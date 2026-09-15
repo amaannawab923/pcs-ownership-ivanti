@@ -1,0 +1,63 @@
+# Standalone OpenFGA for PCS-10243 -- its OWN compose project (pcsfga), its
+# OWN Postgres and volume, so destroying/recreating a PCS stack never takes
+# the authorization store with it. Every store ever created (demo, scratch,
+# a client cutover rehearsal) stays queryable here across image rebuilds.
+#
+#   openfga/up.sh          # idempotent: up -d, wait for /healthz
+#   openfga/down.sh        # the ONLY thing that deletes stores (asks first)
+#
+# Other stacks reach it on the shared network `pcsfga` as http://openfga:8080
+# (join it: networks: [default, pcsfga] + `pcsfga: {external: true}`), or
+# from the host / host.docker.internal on the published ports below.
+name: pcsfga
+
+services:
+  fga-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: openfga
+      POSTGRES_USER: fga
+      POSTGRES_PASSWORD: fga
+    volumes:
+      - pcsfga-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fga -d openfga"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  openfga-migrate:
+    image: openfga/openfga:v1.8.4
+    command: migrate
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://fga:fga@fga-postgres:5432/openfga?sslmode=disable
+    depends_on:
+      fga-postgres:
+        condition: service_healthy
+
+  openfga:
+    image: openfga/openfga:v1.8.4
+    command: run
+    restart: unless-stopped
+    environment:
+      OPENFGA_DATASTORE_ENGINE: postgres
+      OPENFGA_DATASTORE_URI: postgres://fga:fga@fga-postgres:5432/openfga?sslmode=disable
+      OPENFGA_PLAYGROUND_ENABLED: "true"
+    ports:
+      - "8199:8080"   # HTTP API  (what setup.sh / scratch poll and what `fga` CLI uses)
+      - "8183:8081"   # gRPC
+      - "3010:3000"   # bundled playground page (it is an iframe of play.fga.dev that
+                      # talks to 127.0.0.1:8080 -- only useful if 8080 is also published)
+    depends_on:
+      openfga-migrate:
+        condition: service_completed_successfully
+    # No HEALTHCHECK: the image is distroless (no shell/curl). up.sh polls
+    # /healthz from the host; the pcs-ownership entrypoint polls it too.
+
+volumes:
+  pcsfga-postgres:
+
+networks:
+  default:
+    name: pcsfga

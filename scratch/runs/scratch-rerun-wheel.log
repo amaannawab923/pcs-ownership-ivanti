@@ -1,0 +1,1375 @@
+
+############################################################
+# [1/9] base services up, scratch Postgres databases
+############################################################
+time="2026-09-14T06:34:56+05:30" level=warning msg="Found orphan containers ([pcssetup-scratch-db-1]) for this project. If you removed or renamed this service in your compose file, you can run this command with the --remove-orphans flag to clean it up."
+ Container pcssetup-redis-1  Running
+ Container pcssetup-postgres-1  Running
+ Container pcssetup-openfga-db-init-1  Created
+ Container pcssetup-openfga-migrate-1  Created
+ Container pcssetup-openfga-1  Recreate
+ Container pcssetup-openfga-1  Recreated
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-openfga-db-init-1  Starting
+ Container pcssetup-openfga-db-init-1  Started
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-openfga-db-init-1  Waiting
+ Container pcssetup-openfga-db-init-1  Exited
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-openfga-migrate-1  Starting
+ Container pcssetup-openfga-migrate-1  Started
+ Container pcssetup-openfga-migrate-1  Waiting
+ Container pcssetup-openfga-migrate-1  Exited
+ Container pcssetup-openfga-1  Starting
+ Container pcssetup-openfga-1  Started
+ Container pcssetup-postgres-1  Running
+postgres:5432 - accepting connections
+  superset_scratch + examples_scratch databases ready
+
+############################################################
+# [2/9] scratch OpenFGA store (NEW -- the pcssetup demo store is untouched)
+############################################################
+  scratch/.scratch-out/store.env: SCRATCH_OPENFGA_STORE_ID=01M2DKZP23H87R1WG10KJNZK61 SCRATCH_OPENFGA_MODEL_ID=01M2DM00251TBWPNC5PHKHHDBS
+
+############################################################
+# [3/9] stock init on the scratch DB, OWNERSHIP_ENABLED=false (content only, no migration yet)
+############################################################
+ Container pcssetup-postgres-1  Running
+ Container pcssetup-openfga-db-init-1  Created
+ Container pcssetup-scratch-db-1  Created
+ Container pcssetup-openfga-migrate-1  Created
+ Container pcssetup-openfga-1  Running
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-openfga-db-init-1  Starting
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-scratch-db-1  Starting
+ Container pcssetup-scratch-db-1  Started
+ Container pcssetup-openfga-db-init-1  Started
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-openfga-db-init-1  Waiting
+ Container pcssetup-openfga-db-init-1  Exited
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-openfga-migrate-1  Starting
+ Container pcssetup-openfga-migrate-1  Started
+ Container pcssetup-openfga-migrate-1  Waiting
+ Container pcssetup-openfga-migrate-1  Exited
+[entrypoint-ownership] stock init: superset db upgrade
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:05:26,893:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:05:26,893:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:05:26,893:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:05:26,912:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:05:26,923:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:05:27,191:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:05:27,193:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:05:27,193:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:05:27,196:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:05:27,196:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:05:27,196:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:05:27,196:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:05:27,203:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:27,203:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:27,206:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:05:27,210:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:27,210:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:27,217:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:27,217:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:27,226:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:27,226:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:27,233:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:27,233:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:27,234:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:05:27,234:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:05:27,236:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:05:27,239:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:05:27,328:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:05:27,408:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:27,408:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:27,414:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:05:27,415:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:27,415:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:27,582:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:05:27,587:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:05:27,774:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+INFO  [alembic.env] Starting the migration scripts.
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.env] Migration scripts completed. Duration: 00:00:00
+[entrypoint-ownership] loading examples (SUPERSET_LOAD_EXAMPLES=yes)
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:05:30,924:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:05:30,924:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:05:30,924:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:05:30,941:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:05:30,952:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:05:31,208:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:05:31,209:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:05:31,209:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:05:31,212:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:05:31,212:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:05:31,212:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:05:31,213:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:05:31,219:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:31,219:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:31,222:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:05:31,226:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:31,226:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:31,232:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:31,232:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:31,239:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:31,239:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:31,246:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:31,246:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:31,247:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:05:31,247:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:05:31,249:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:05:31,252:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:05:31,325:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:05:31,398:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:31,398:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:31,405:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:05:31,406:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:31,406:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:31,557:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:05:31,562:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:05:31,749:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+2026-09-14 01:05:31,758:INFO:superset.cli.examples:Loading examples metadata and related data into examples
+2026-09-14 01:05:32,211:INFO:superset.cli.examples:Loading [Bart Lines]
+2026-09-14 01:05:32,249:INFO:superset.examples.generic_loader:Table bart_lines already exists, skipping data load
+2026-09-14 01:05:32,250:INFO:superset.cli.examples:Loading [Birth France By Region]
+2026-09-14 01:05:32,260:INFO:superset.examples.generic_loader:Table birth_france_by_region already exists, skipping data load
+2026-09-14 01:05:32,261:INFO:superset.cli.examples:Loading [Cleaned Sales Data]
+2026-09-14 01:05:32,271:INFO:superset.examples.generic_loader:Table cleaned_sales_data already exists, skipping data load
+2026-09-14 01:05:32,271:INFO:superset.cli.examples:Loading [Fcc New Coder Survey]
+2026-09-14 01:05:32,281:INFO:superset.examples.generic_loader:Table FCC 2018 Survey already exists, skipping data load
+2026-09-14 01:05:32,282:INFO:superset.cli.examples:Loading [Flights]
+2026-09-14 01:05:32,291:INFO:superset.examples.generic_loader:Table flights already exists, skipping data load
+2026-09-14 01:05:32,292:INFO:superset.cli.examples:Loading [Hierarchical Dataset]
+2026-09-14 01:05:32,302:INFO:superset.examples.generic_loader:Table hierarchical_dataset already exists, skipping data load
+2026-09-14 01:05:32,303:INFO:superset.cli.examples:Loading [International Sales]
+2026-09-14 01:05:32,312:INFO:superset.examples.generic_loader:Table international_sales already exists, skipping data load
+2026-09-14 01:05:32,313:INFO:superset.cli.examples:Loading [Long Lat]
+2026-09-14 01:05:32,322:INFO:superset.examples.generic_loader:Table long_lat already exists, skipping data load
+2026-09-14 01:05:32,323:INFO:superset.cli.examples:Loading [Members Channels 2]
+2026-09-14 01:05:32,333:INFO:superset.examples.generic_loader:Table members_channels_2 already exists, skipping data load
+2026-09-14 01:05:32,334:INFO:superset.cli.examples:Loading [Messages]
+2026-09-14 01:05:32,343:INFO:superset.examples.generic_loader:Table messages already exists, skipping data load
+2026-09-14 01:05:32,344:INFO:superset.cli.examples:Loading [Messages Channels]
+2026-09-14 01:05:32,355:INFO:superset.examples.generic_loader:Table messages_channels already exists, skipping data load
+2026-09-14 01:05:32,356:INFO:superset.cli.examples:Loading [New Members Daily]
+2026-09-14 01:05:32,368:INFO:superset.examples.generic_loader:Table new_members_daily already exists, skipping data load
+2026-09-14 01:05:32,368:INFO:superset.cli.examples:Loading [Project Management]
+2026-09-14 01:05:32,379:INFO:superset.examples.generic_loader:Table project_management already exists, skipping data load
+2026-09-14 01:05:32,380:INFO:superset.cli.examples:Loading [Sales Dashboard]
+2026-09-14 01:05:32,391:INFO:superset.examples.generic_loader:Table cleaned_sales_data already exists, skipping data load
+2026-09-14 01:05:32,391:INFO:superset.cli.examples:Loading [Sf Population Polygons]
+2026-09-14 01:05:32,402:INFO:superset.examples.generic_loader:Table sf_population_polygons already exists, skipping data load
+2026-09-14 01:05:32,402:INFO:superset.cli.examples:Loading [Threads]
+2026-09-14 01:05:32,413:INFO:superset.examples.generic_loader:Table threads already exists, skipping data load
+2026-09-14 01:05:32,413:INFO:superset.cli.examples:Loading [Unicode Test]
+2026-09-14 01:05:32,424:INFO:superset.examples.generic_loader:Table unicode_test already exists, skipping data load
+2026-09-14 01:05:32,425:INFO:superset.cli.examples:Loading [Usa Births Names]
+2026-09-14 01:05:32,435:INFO:superset.examples.generic_loader:Table birth_names already exists, skipping data load
+2026-09-14 01:05:32,436:INFO:superset.cli.examples:Loading [Users]
+2026-09-14 01:05:32,446:INFO:superset.examples.generic_loader:Table users already exists, skipping data load
+2026-09-14 01:05:32,446:INFO:superset.cli.examples:Loading [Users Channels-Uzoonntsro]
+2026-09-14 01:05:32,457:INFO:superset.examples.generic_loader:Table users_channels-uzooNNtSRO already exists, skipping data load
+2026-09-14 01:05:32,458:INFO:superset.cli.examples:Loading [Video Game Sales]
+2026-09-14 01:05:32,469:INFO:superset.examples.generic_loader:Table video_game_sales already exists, skipping data load
+2026-09-14 01:05:32,469:INFO:superset.cli.examples:Loading [Wb Health Population]
+2026-09-14 01:05:32,479:INFO:superset.examples.generic_loader:Table wb_health_population already exists, skipping data load
+2026-09-14 01:05:32,480:INFO:superset.cli.examples:Loading [World Health]
+2026-09-14 01:05:32,490:INFO:superset.examples.generic_loader:Table wb_health_population already exists, skipping data load
+2026-09-14 01:05:35,603:WARNING:superset.commands.dataset.importers.v1.utils:Couldn't check if table project_management exists, assuming it does
+[entrypoint-ownership] creating admin user (idempotent: fab create-admin no-ops if present)
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:05:43,711:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:05:43,711:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:05:43,711:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:05:43,729:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:05:43,739:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:05:44,014:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:05:44,015:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:05:44,015:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:05:44,019:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:05:44,019:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:05:44,019:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:05:44,019:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:05:44,026:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:44,026:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:44,028:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:05:44,032:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:44,033:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:44,039:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:44,039:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:44,046:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:44,046:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:44,053:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:44,053:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:44,055:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:05:44,055:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:05:44,056:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:05:44,059:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:05:44,146:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:05:44,222:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:44,222:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:44,230:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:05:44,230:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:44,230:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:44,403:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:05:44,408:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:05:44,592:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+Recognized Database Authentications.
+Error! User already exists admin
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:05:47,595:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:05:47,595:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:05:47,595:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:05:47,613:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:05:47,623:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:05:47,891:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:05:47,893:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:05:47,893:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:05:47,896:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:05:47,896:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:05:47,896:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:05:47,896:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:05:47,903:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:47,903:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:47,906:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:05:47,911:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:47,911:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:47,917:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:47,917:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:47,925:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:47,925:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:47,931:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:47,931:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:47,933:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:05:47,933:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:05:47,934:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:05:47,937:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:05:48,011:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:05:48,078:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:48,078:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:48,086:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:05:48,086:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:05:48,086:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:05:48,266:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:05:48,271:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:05:48,477:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+2026-09-14 01:05:49,132:INFO:superset.security.manager:Syncing role definition
+2026-09-14 01:05:49,146:INFO:superset.security.manager:Syncing Admin perms
+2026-09-14 01:05:49,147:INFO:superset.security.manager:Syncing Alpha perms
+2026-09-14 01:05:49,150:INFO:superset.security.manager:Syncing Gamma perms
+2026-09-14 01:05:49,152:INFO:superset.security.manager:Syncing sql_lab perms
+2026-09-14 01:05:49,153:INFO:superset.security.manager:Fetching a set of all perms to lookup which ones are missing
+2026-09-14 01:05:49,155:INFO:superset.security.manager:Creating missing datasource permissions.
+2026-09-14 01:05:49,159:INFO:superset.security.manager:Creating missing database permissions.
+2026-09-14 01:05:49,160:INFO:superset.security.manager:Creating missing semantic layer and view permissions.
+2026-09-14 01:05:49,163:INFO:superset.security.manager:Cleaning faulty perms
+[entrypoint-ownership] OWNERSHIP_ENABLED is not 'true' -- skipping ownership migration/check
+[entrypoint-ownership] init complete
+  init complete -- content loaded, ownership migration deliberately NOT run yet (see header comment)
+
+############################################################
+# [4/9] superset + worker up, OWNERSHIP_ENABLED=false
+############################################################
+ Container pcssetup-redis-1  Running
+ Container pcssetup-postgres-1  Running
+ Container pcssetup-openfga-db-init-1  Created
+ Container pcssetup-scratch-db-1  Created
+ Container pcssetup-openfga-migrate-1  Created
+ Container pcssetup-openfga-1  Running
+ Container pcssetup-worker-1  Stopping
+ Container pcssetup-worker-1  Stopped
+ Container pcssetup-superset-1  Recreate
+ Container pcssetup-superset-1  Recreated
+ Container pcssetup-worker-1  Recreate
+ Container pcssetup-worker-1  Recreated
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-scratch-db-1  Starting
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-openfga-db-init-1  Starting
+ Container pcssetup-scratch-db-1  Started
+ Container pcssetup-openfga-db-init-1  Started
+ Container pcssetup-openfga-db-init-1  Waiting
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-openfga-db-init-1  Exited
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-openfga-migrate-1  Starting
+ Container pcssetup-openfga-migrate-1  Started
+ Container pcssetup-openfga-migrate-1  Waiting
+ Container pcssetup-openfga-migrate-1  Exited
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-redis-1  Waiting
+ Container pcssetup-scratch-db-1  Waiting
+ Container pcssetup-redis-1  Healthy
+ Container pcssetup-scratch-db-1  Exited
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-superset-1  Starting
+ Container pcssetup-superset-1  Started
+ Container pcssetup-scratch-db-1  Waiting
+ Container pcssetup-superset-1  Waiting
+ Container pcssetup-scratch-db-1  Exited
+ Container pcssetup-superset-1  Healthy
+ Container pcssetup-worker-1  Starting
+ Container pcssetup-worker-1  Started
+  superset is healthy (ownership switch off): ed24e36a8f0f06d6c6308de35b690f0e6e637e9808bc2b76ba25a3cb3dd80a07
+
+############################################################
+# [5/9] identities + directory + FGA vocabulary extras
+############################################################
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:06:22,902:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:06:22,902:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:06:22,902:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:06:22,959:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:06:22,969:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:06:23,230:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:06:23,231:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:06:23,231:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:06:23,234:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:06:23,234:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:06:23,234:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:06:23,234:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:06:23,241:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:23,241:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:23,243:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:06:23,248:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:23,248:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:23,255:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:23,255:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:23,264:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:23,264:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:23,270:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:23,270:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:23,272:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:06:23,272:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:06:23,274:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:06:23,277:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:06:23,359:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:06:23,423:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:23,423:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:23,430:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:06:23,430:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:23,430:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:23,596:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:06:23,602:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:06:23,799:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+2026-09-14 01:06:23,814:WARNING:py.warnings:/tmp/seed_identity.py:78: SADeprecationWarning: The argument signature for the "ConnectionEvents.engine_connect" event listener has changed as of version 2.0, and conversion for the old argument signature will be removed in a future release.  The new signature is "def engine_connect(conn)"
+  created.append((guid, label, tenant, getattr(user, "id", None)))
+
+MARKER member 3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31 superset_id=2 tenant=a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 (Ada (tenant A))
+MARKER member 6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53 superset_id=3 tenant=a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 (Ben (tenant A))
+MARKER member 9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76 superset_id=4 tenant=b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 (Cleo (tenant B))
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:06:26,856:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:06:26,856:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:06:26,856:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:06:26,914:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:06:26,925:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:06:27,193:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:06:27,194:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:06:27,194:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:06:27,197:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:06:27,197:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:06:27,197:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:06:27,197:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:06:27,204:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:27,204:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:27,206:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:06:27,210:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:27,210:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:27,216:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:27,216:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:27,223:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:27,223:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:27,229:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:27,229:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:27,231:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:06:27,231:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:06:27,233:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:06:27,236:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:06:27,307:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:06:27,368:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:27,368:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:27,376:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:06:27,377:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:27,377:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:27,547:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:06:27,552:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:06:27,746:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+2026-09-14 01:06:27,762:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:9fcc709c-1a6b-4882-b8e3-1787afe31417', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,764:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:9fcc709c-1a6b-4882-b8e3-1787afe31417', 'relation': 'member', 'object': 'group:dashboard_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,765:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:9fcc709c-1a6b-4882-b8e3-1787afe31417', 'relation': 'member', 'object': 'group:data_analyst_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,769:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:4302756e-b4aa-4938-b599-ed593444aeaf', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,770:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:4302756e-b4aa-4938-b599-ed593444aeaf', 'relation': 'member', 'object': 'group:chart_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,771:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:4302756e-b4aa-4938-b599-ed593444aeaf', 'relation': 'member', 'object': 'group:data_analyst_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,775:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:58a4685c-6e11-4c4f-aad3-444839fc846a', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,777:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:58a4685c-6e11-4c4f-aad3-444839fc846a', 'relation': 'member', 'object': 'group:data_analyst_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,779:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:12fc0874-6358-48e8-96cb-6ada75fd8c76', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,780:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:12fc0874-6358-48e8-96cb-6ada75fd8c76', 'relation': 'member', 'object': 'group:marketing_analytics_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,783:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:e5a6a6c5-c81d-49a3-a9f8-c1614639fe6f', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,784:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:e5a6a6c5-c81d-49a3-a9f8-c1614639fe6f', 'relation': 'member', 'object': 'group:marketing_analytics_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,785:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:e5a6a6c5-c81d-49a3-a9f8-c1614639fe6f', 'relation': 'member', 'object': 'group:dashboard_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,788:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:bb355a29-91b4-4353-96ae-714919c21afc', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,789:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:bb355a29-91b4-4353-96ae-714919c21afc', 'relation': 'member', 'object': 'group:finance_reporting_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,792:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:b5807abf-02eb-409e-805d-35eceb60d67c', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,794:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:b5807abf-02eb-409e-805d-35eceb60d67c', 'relation': 'member', 'object': 'group:finance_reporting_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,795:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:b5807abf-02eb-409e-805d-35eceb60d67c', 'relation': 'member', 'object': 'group:data_analyst_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,798:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:fa17aa75-9521-4c64-a848-8a0edd1bc316', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,799:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:fa17aa75-9521-4c64-a848-8a0edd1bc316', 'relation': 'member', 'object': 'group:engineering_metrics_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,802:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:e19ffd42-45dc-44ae-bb0e-376ab953469c', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,803:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:e19ffd42-45dc-44ae-bb0e-376ab953469c', 'relation': 'member', 'object': 'group:engineering_metrics_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,804:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:e19ffd42-45dc-44ae-bb0e-376ab953469c', 'relation': 'member', 'object': 'group:chart_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,807:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:b675fa48-ddb1-48c5-a233-d2d10d655526', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,808:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:b675fa48-ddb1-48c5-a233-d2d10d655526', 'relation': 'member', 'object': 'group:support_ops_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,811:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:af2fb185-ca1c-4640-ba61-33dd9b1977b6', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,812:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:af2fb185-ca1c-4640-ba61-33dd9b1977b6', 'relation': 'member', 'object': 'group:executives_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,816:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:4ddb1932-8b1c-49be-93b1-a9920129874b', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,817:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:4ddb1932-8b1c-49be-93b1-a9920129874b', 'relation': 'member', 'object': 'group:executives_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,818:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:4ddb1932-8b1c-49be-93b1-a9920129874b', 'relation': 'member', 'object': 'group:dashboard_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:27,821:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:60f317ea-66cb-48a0-8d45-e15699486409', 'relation': 'member', 'object': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,822:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:60f317ea-66cb-48a0-8d45-e15699486409', 'relation': 'member', 'object': 'group:dashboard_designer_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,823:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:60f317ea-66cb-48a0-8d45-e15699486409', 'relation': 'member', 'object': 'group:sales_ops_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,826:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:e64caf0a-30fc-4f79-8f5a-e0a64dced4ad', 'relation': 'member', 'object': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,826:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:e64caf0a-30fc-4f79-8f5a-e0a64dced4ad', 'relation': 'member', 'object': 'group:data_analyst_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,830:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:a105bfbe-3b53-43d6-bc1c-953293a35c54', 'relation': 'member', 'object': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,831:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:a105bfbe-3b53-43d6-bc1c-953293a35c54', 'relation': 'member', 'object': 'group:sales_ops_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,833:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:21387ae6-c116-4a2a-bd19-c46828e2e40d', 'relation': 'member', 'object': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,835:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:21387ae6-c116-4a2a-bd19-c46828e2e40d', 'relation': 'member', 'object': 'group:data_analyst_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,836:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:21387ae6-c116-4a2a-bd19-c46828e2e40d', 'relation': 'member', 'object': 'group:chart_designer_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,839:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:3724dadf-3dd0-4678-bc43-46e49d49702b', 'relation': 'member', 'object': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,840:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:3724dadf-3dd0-4678-bc43-46e49d49702b', 'relation': 'member', 'object': 'group:executives_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,843:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:163da054-16e6-46e6-8587-6677e74fe516', 'relation': 'member', 'object': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,844:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:163da054-16e6-46e6-8587-6677e74fe516', 'relation': 'member', 'object': 'group:support_ops_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,846:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:b7a007be-ed05-4971-99fc-6c7ade4faa86', 'relation': 'member', 'object': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,847:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:b7a007be-ed05-4971-99fc-6c7ade4faa86', 'relation': 'member', 'object': 'group:finance_reporting_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:27,848:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:b7a007be-ed05-4971-99fc-6c7ade4faa86', 'relation': 'member', 'object': 'group:executives_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+MARKER seed_directory: {'users': 0, 'existing_users': 19, 'member_tuples': 19, 'group_tuples': 28}
+MARKER tenant a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 groups: ['chart_designer', 'dashboard_designer', 'data_analyst', 'engineering_metrics', 'executives', 'finance_reporting', 'marketing_analytics', 'support_ops']
+MARKER tenant b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 groups: ['chart_designer', 'dashboard_designer', 'data_analyst', 'executives', 'finance_reporting', 'sales_ops', 'support_ops']
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:06:30,832:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:06:30,832:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:06:30,832:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:06:30,890:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:06:30,900:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:06:31,154:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:06:31,155:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:06:31,155:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:06:31,158:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:06:31,158:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:06:31,158:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:06:31,158:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:06:31,164:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:31,164:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:31,167:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:06:31,171:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:31,171:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:31,176:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:31,176:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:31,184:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:31,184:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:31,190:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:31,190:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:31,192:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:06:31,192:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:06:31,194:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:06:31,197:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:06:31,268:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:06:31,331:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:31,331:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:31,339:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:06:31,340:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:31,340:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:31,496:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:06:31,502:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:06:31,684:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+2026-09-14 01:06:31,686:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:dashboard_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,688:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:data_analyst_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,689:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:chart_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,690:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:marketing_analytics_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,692:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:finance_reporting_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,693:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:engineering_metrics_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,694:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:support_ops_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,696:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:executives_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,697:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'tenant', 'object': 'group:tenant_administrator_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,698:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31', 'relation': 'member', 'object': 'group:tenant_administrator_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,699:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31', 'relation': 'member', 'object': 'tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,700:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'group:tenant_administrator_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member', 'relation': 'member', 'object': 'group:dashboard_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'}] deletes=None
+2026-09-14 01:06:31,701:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'tenant', 'object': 'group:dashboard_designer_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,702:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'tenant', 'object': 'group:data_analyst_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,704:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'tenant', 'object': 'group:sales_ops_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,705:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'tenant', 'object': 'group:chart_designer_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,706:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'tenant', 'object': 'group:executives_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,707:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'tenant', 'object': 'group:support_ops_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,708:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'tenant', 'object': 'group:finance_reporting_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,709:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'tenant', 'object': 'group:tenant_administrator_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,711:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76', 'relation': 'member', 'object': 'group:tenant_administrator_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,712:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76', 'relation': 'member', 'object': 'tenant:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+2026-09-14 01:06:31,714:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'group:tenant_administrator_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member', 'relation': 'member', 'object': 'group:dashboard_designer_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'}] deletes=None
+MARK seed_fga_extra: {'group_tenant_tuples': 15, 'admin_group_tuples': 2, 'admin_members': 2, 'nested': 2}
+
+############################################################
+# [6/9] real row-level tenancy: shared datasets, exclusive datasets, Neurons-shaped dataset + dashboards
+############################################################
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:06:34,825:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:06:34,825:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:06:34,825:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:06:34,888:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:06:34,898:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:06:35,150:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:06:35,151:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:06:35,151:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:06:35,155:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:06:35,155:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:06:35,155:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:06:35,155:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:06:35,161:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:35,161:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:35,164:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:06:35,167:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:35,167:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:35,173:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:35,173:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:35,180:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:35,180:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:35,187:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:35,187:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:35,188:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:06:35,188:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:06:35,190:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:06:35,192:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:06:35,264:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:06:35,327:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:35,327:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:35,335:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:06:35,335:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:35,335:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:35,496:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:06:35,501:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:06:35,683:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+2026-09-14 01:06:35,690:WARNING:py.warnings:/tmp/seed_tenant_data.py:91: SADeprecationWarning: The argument signature for the "ConnectionEvents.engine_connect" event listener has changed as of version 2.0, and conversion for the old argument signature will be removed in a future release.  The new signature is "def engine_connect(conn)"
+  .filter_by(role_id=role.id, type=int(SubjectType.ROLE))
+
+2026-09-14 01:06:35,821:WARNING:py.warnings:/tmp/seed_tenant_data.py:104: SADeprecationWarning: The argument signature for the "ConnectionEvents.engine_connect" event listener has changed as of version 2.0, and conversion for the old argument signature will be removed in a future release.  The new signature is "def engine_connect(conn)"
+  pvm = sm.find_permission_view_menu("datasource_access", table.perm)
+
+2026-09-14 01:06:36,237:WARNING:py.warnings:/tmp/seed_tenant_data.py:205: SADeprecationWarning: The argument signature for the "ConnectionEvents.engine_connect" event listener has changed as of version 2.0, and conversion for the old argument signature will be removed in a future release.  The new signature is "def engine_connect(conn)"
+  tables = db.session.query(SqlaTable).order_by(SqlaTable.id).all()
+
+2026-09-14 01:06:36,239:WARNING:py.warnings:/tmp/seed_tenant_data.py:91: SADeprecationWarning: The argument signature for the "ConnectionEvents.engine_connect" event listener has changed as of version 2.0, and conversion for the old argument signature will be removed in a future release.  The new signature is "def engine_connect(conn)"
+  .filter_by(role_id=role.id, type=int(SubjectType.ROLE))
+
+2026-09-14 01:06:36,379:WARNING:py.warnings:/tmp/seed_tenant_data.py:233: SADeprecationWarning: The argument signature for the "ConnectionEvents.engine_connect" event listener has changed as of version 2.0, and conversion for the old argument signature will be removed in a future release.  The new signature is "def engine_connect(conn)"
+  return made, {t.table_name: assignment[t.id] for t in exclusive}
+
+2026-09-14 01:06:36,476:WARNING:py.warnings:/tmp/seed_tenant_data.py:401: SADeprecationWarning: The argument signature for the "ConnectionEvents.engine_connect" event listener has changed as of version 2.0, and conversion for the old argument signature will be removed in a future release.  The new signature is "def engine_connect(conn)"
+  results.append((dash_title, f"{admin.first_name} ({admin_guid[:8]})", tenant))
+
+MARK shared dataset cleaned_sales_data: deal_size in (Small, Medium) -> tenant A, else tenant B
+MARK shared dataset birth_names: state alphabetically A-M -> tenant A, N-Z (and null) -> tenant B
+MARK shared dataset video_game_sales: platform alphabetically A-M -> tenant A, N-Z -> tenant B
+MARK ensure_shared_datasets: {'columns_added': 0, 'rows_backfilled': {'cleaned_sales_data': 2823, 'birth_names': 75691, 'video_game_sales': 16595}, 'grants': 0, 'rls': 0}
+MARK exclusive datasets: 18 bound -- A=9 B=9
+MARK ensure_exclusive_datasets: {'grants': 0, 'rls': 0}
+MARK neurons dashboard: Tenant A Device Compliance owner=Ada tenant=a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 charts=3
+MARK neurons dashboard: Tenant B Device Compliance owner=Cleo tenant=b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 charts=3
+MARK seed_tenant_data: done {'shared_tables': ['cleaned_sales_data', 'birth_names', 'video_game_sales'], 'exclusive_tables': 18, 'neurons_dashboards': 2}
+
+############################################################
+# [7/9] dataset-access-aware ownership attribution of the example dashboards/charts
+############################################################
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:06:39,698:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:06:39,698:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:06:39,698:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:06:39,755:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:06:39,765:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:06:40,023:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:06:40,024:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:06:40,024:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED='false' in the environment is the default; an earlier config layer set OWNERSHIP_ENABLED=True as a Python setting, and a config layer wins over the environment.
+2026-09-14 01:06:40,027:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:06:40,027:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:06:40,027:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:06:40,027:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:06:40,034:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:40,034:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:40,037:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:06:40,041:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:40,041:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:40,047:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:40,047:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:40,054:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:40,054:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:40,061:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:40,061:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:40,063:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:06:40,063:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:06:40,065:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:06:40,067:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:06:40,141:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:06:40,211:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:40,211:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:40,219:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:06:40,219:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:06:40,219:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:06:40,373:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:06:40,379:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:06:40,561:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+2026-09-14 01:06:40,562:WARNING:py.warnings:/tmp/assign_examples.py:157: SADeprecationWarning: The argument signature for the "ConnectionEvents.engine_connect" event listener has changed as of version 2.0, and conversion for the old argument signature will be removed in a future release.  The new signature is "def engine_connect(conn)"
+  for dash in db.session.query(Dashboard).order_by(Dashboard.id).all():
+
+2026-09-14 01:06:40,621:WARNING:superset_ownership.guard:superset_ownership: access fields corrected on chart 2 (private) -- denial restored=False, direct viewers stripped=0, direct editors stripped=1, direct editors added=0
+2026-09-14 01:06:40,624:WARNING:superset_ownership.guard:superset_ownership: access fields corrected on chart 3 (shared) -- denial restored=False, direct viewers stripped=0, direct editors stripped=1, direct editors added=0
+2026-09-14 01:06:40,978:WARNING:superset_ownership.guard:superset_ownership: access fields corrected on chart 57 (shared) -- denial restored=False, direct viewers stripped=0, direct editors stripped=1, direct editors added=0
+2026-09-14 01:06:41,332:INFO:superset_ownership.audit:AUDIT {'event': 'ownership.access_corrected', 'occurred_at': '2026-09-14T01:06:40.621510Z', 'actor': {'superset_id': None, 'member_guid': None, 'tenant_guid': None, 'username': None}, 'object': {'type': 'chart', 'id': 2, 'uuid': '7b12a243-88e0-4dc5-ac33-9a840bb0ac5a'}, 'before': {'enforced': True, 'direct_viewers': 0, 'direct_editors': 1}, 'after': {'enforced': True, 'visibility': 'private', 'direct_viewers': 0, 'direct_editors': 0}, 'request_id': None}
+2026-09-14 01:06:41,332:INFO:superset_ownership.audit:AUDIT {'event': 'ownership.access_corrected', 'occurred_at': '2026-09-14T01:06:40.624883Z', 'actor': {'superset_id': None, 'member_guid': None, 'tenant_guid': None, 'username': None}, 'object': {'type': 'chart', 'id': 3, 'uuid': '08aff161-f60c-4cb3-a225-dc9b1140d2e3'}, 'before': {'enforced': True, 'direct_viewers': 0, 'direct_editors': 1}, 'after': {'enforced': True, 'visibility': 'shared', 'direct_viewers': 0, 'direct_editors': 0}, 'request_id': None}
+2026-09-14 01:06:41,332:INFO:superset_ownership.audit:AUDIT {'event': 'ownership.access_corrected', 'occurred_at': '2026-09-14T01:06:40.978343Z', 'actor': {'superset_id': None, 'member_guid': None, 'tenant_guid': None, 'username': None}, 'object': {'type': 'chart', 'id': 57, 'uuid': '02f546ae-1bf4-bd26-8bc2-14b9279c8a62'}, 'before': {'enforced': True, 'direct_viewers': 0, 'direct_editors': 1}, 'after': {'enforced': True, 'visibility': 'shared', 'direct_viewers': 0, 'direct_editors': 0}, 'request_id': None}
+MARK VIOLATION dashboard 2 'Misc Charts': charts spanned tenants {'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92': 2, 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40': 1}; kept b7f28e5a, removed from dashboard: ['Unicode Cloud']
+MARK VIOLATION dashboard 3 'Featured Charts': charts spanned tenants {'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92': 1, 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40': 1}; kept b7f28e5a, removed from dashboard: ['Tree']
+MARK VIOLATION dashboard 4 'Slack Dashboard': charts spanned tenants {'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40': 4, 'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92': 5}; kept b7f28e5a, removed from dashboard: ['Weekly Messages', 'Cross Channel Relationship', 'Cross Channel Relationship heatmap_v2', 'New Members per Month']
+MARK VIOLATION dashboard 9 'deck.gl Demo': charts spanned tenants {'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92': 1, 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40': 6}; kept a1e4c2d0, removed from dashboard: ['Deck.gl Arcs']
+  id  dashboard                                   owner                       tenant      charts
+----------------------------------------------------------------------------------------------------
+   1  Sales Dashboard                             Marcus (4302756e)           a1e4c2d0    10
+   2  Misc Charts                                 Omar (60f317ea)             b7f28e5a    2
+   3  Featured Charts                             Hannah (e64caf0a)           b7f28e5a    24
+   4  Slack Dashboard                             Diego (a105bfbe)            b7f28e5a    5
+   5  World Bank's Data                           Mei (21387ae6)              b7f28e5a    9
+   6  FCC New Coder Survey 2018                   Priya (9fcc709c)            a1e4c2d0    21
+   7  USA Births Names                            Ada (3f0a91c7)              a1e4c2d0    10
+   8  Video Game Sales                            Ada (3f0a91c7)              a1e4c2d0    8
+   9  deck.gl Demo                                Elena (58a4685c)            a1e4c2d0    6
+MARK assign_examples: 9 dashboards attributed, 7 violation(s)
+MARK   VIOLATION dashboard 2 'Misc Charts': charts spanned tenants {'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92': 2, 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40': 1}; kept b7f28e5a, removed from dashboard: ['Unicode Cloud']
+MARK   VIOLATION dashboard 3 'Featured Charts': charts spanned tenants {'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92': 1, 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40': 1}; kept b7f28e5a, removed from dashboard: ['Tree']
+MARK   VIOLATION dashboard 4 'Slack Dashboard': charts spanned tenants {'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40': 4, 'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92': 5}; kept b7f28e5a, removed from dashboard: ['Weekly Messages', 'Cross Channel Relationship', 'Cross Channel Relationship heatmap_v2', 'New Members per Month']
+MARK   pin mismatch dashboard 4 'Slack Dashboard': pinned a1e4c2d0 not in compatible ['b7f28e5a']
+MARK   pin mismatch dashboard 6 'FCC New Coder Survey 2018': pinned b7f28e5a not in compatible ['a1e4c2d0']
+MARK   VIOLATION dashboard 9 'deck.gl Demo': charts spanned tenants {'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92': 1, 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40': 6}; kept a1e4c2d0, removed from dashboard: ['Deck.gl Arcs']
+MARK   pin mismatch dashboard 9 'deck.gl Demo': pinned b7f28e5a not in compatible ['a1e4c2d0']
+
+############################################################
+# [8/9] flip OWNERSHIP_ENABLED=true, restart: migrate -> backfill -> backfill-tenants -> check runs ONCE, over attributed data
+############################################################
+ Container pcssetup-redis-1  Running
+ Container pcssetup-postgres-1  Running
+ Container pcssetup-openfga-db-init-1  Created
+ Container pcssetup-openfga-migrate-1  Created
+ Container pcssetup-scratch-db-1  Created
+ Container pcssetup-openfga-1  Running
+ Container pcssetup-worker-1  Stopping
+ Container pcssetup-worker-1  Stopped
+ Container pcssetup-superset-1  Recreate
+ Container pcssetup-superset-1  Recreated
+ Container pcssetup-worker-1  Recreate
+ Container pcssetup-worker-1  Recreated
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-scratch-db-1  Starting
+ Container pcssetup-openfga-db-init-1  Starting
+ Container pcssetup-openfga-db-init-1  Started
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-openfga-db-init-1  Waiting
+ Container pcssetup-scratch-db-1  Started
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-openfga-db-init-1  Exited
+ Container pcssetup-openfga-migrate-1  Starting
+ Container pcssetup-openfga-migrate-1  Started
+ Container pcssetup-openfga-migrate-1  Waiting
+ Container pcssetup-openfga-migrate-1  Exited
+ Container pcssetup-scratch-db-1  Waiting
+ Container pcssetup-postgres-1  Waiting
+ Container pcssetup-redis-1  Waiting
+ Container pcssetup-scratch-db-1  Exited
+ Container pcssetup-redis-1  Healthy
+ Container pcssetup-postgres-1  Healthy
+ Container pcssetup-superset-1  Starting
+ Container pcssetup-superset-1  Started
+ Container pcssetup-scratch-db-1  Waiting
+ Container pcssetup-superset-1  Waiting
+ Container pcssetup-scratch-db-1  Exited
+ Container pcssetup-superset-1  Healthy
+ Container pcssetup-worker-1  Starting
+ Container pcssetup-worker-1  Started
+  --- entrypoint log (migration/backfill/check) ---
+superset-1  | Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+superset-1  | 2026-09-14 01:06:59,933:WARNING:superset.initialization:--------------------------------------------------------------------------------
+superset-1  |                                     WARNING
+superset-1  | --------------------------------------------------------------------------------
+superset-1  | 2026-09-14 01:06:59,933:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+superset-1  | Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+superset-1  |   1. Back up the metadata database.
+superset-1  |   2. superset re-encrypt-secrets --engine aes-gcm
+superset-1  |   3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+superset-1  |   4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+superset-1  | See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+superset-1  | 2026-09-14 01:06:59,934:WARNING:superset.initialization:--------------------------------------------------------------------------------
+superset-1  | --------------------------------------------------------------------------------
+superset-1  | 2026-09-14 01:06:59,951:INFO:superset.initialization:Registering blueprint: superset_ownership
+superset-1  | 2026-09-14 01:06:59,962:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+superset-1  |   warnings.warn(
+superset-1  | 
+superset-1  | 2026-09-14 01:07:00,225:INFO:superset.subjects.hooks:Subject sync hooks registered
+superset-1  | 2026-09-14 01:07:00,227:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+superset-1  | 2026-09-14 01:07:00,231:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+superset-1  | 2026-09-14 01:07:00,231:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+superset-1  | 2026-09-14 01:07:00,231:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+superset-1  | 2026-09-14 01:07:00,231:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+superset-1  | 2026-09-14 01:07:00,238:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,238:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,241:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+superset-1  | 2026-09-14 01:07:00,246:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,246:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,254:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,254:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,263:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,263:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,272:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,272:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,274:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+superset-1  | 2026-09-14 01:07:00,274:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+superset-1  | 2026-09-14 01:07:00,276:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+superset-1  | 2026-09-14 01:07:00,279:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+superset-1  | 2026-09-14 01:07:00,372:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+superset-1  | 2026-09-14 01:07:00,442:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,442:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,450:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+superset-1  | 2026-09-14 01:07:00,450:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,450:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,623:INFO:superset.app:Syncing configuration to database...
+superset-1  | 2026-09-14 01:07:00,628:INFO:superset.app:Configuration sync to database completed successfully
+superset-1  | 2026-09-14 01:07:00,830:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+superset-1  | 2026-09-14 01:07:00,835:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,835:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,838:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+superset-1  | 2026-09-14 01:07:00,841:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,841:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,847:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,847:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,854:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,854:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:00,860:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:00,860:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | {
+superset-1  |   "chain": "ownership",
+superset-1  |   "current": "0003_ownership_foreign_keys",
+superset-1  |   "upgraded_to": "head"
+superset-1  | }
+superset-1  | [entrypoint-ownership] superset ownership backfill (every pre-existing chart/dashboard -> public, owner=creator; idempotent)
+superset-1  | Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+superset-1  | 2026-09-14 01:07:03,685:WARNING:superset.initialization:--------------------------------------------------------------------------------
+superset-1  |                                     WARNING
+superset-1  | --------------------------------------------------------------------------------
+superset-1  | 2026-09-14 01:07:03,685:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+superset-1  | Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+superset-1  |   1. Back up the metadata database.
+superset-1  |   2. superset re-encrypt-secrets --engine aes-gcm
+superset-1  |   3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+superset-1  |   4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+superset-1  | See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+superset-1  | 2026-09-14 01:07:03,685:WARNING:superset.initialization:--------------------------------------------------------------------------------
+superset-1  | --------------------------------------------------------------------------------
+superset-1  | 2026-09-14 01:07:03,748:INFO:superset.initialization:Registering blueprint: superset_ownership
+superset-1  | 2026-09-14 01:07:03,758:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+superset-1  |   warnings.warn(
+superset-1  | 
+superset-1  | 2026-09-14 01:07:04,026:INFO:superset.subjects.hooks:Subject sync hooks registered
+superset-1  | 2026-09-14 01:07:04,027:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+superset-1  | 2026-09-14 01:07:04,030:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+superset-1  | 2026-09-14 01:07:04,030:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+superset-1  | 2026-09-14 01:07:04,030:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+superset-1  | 2026-09-14 01:07:04,030:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+superset-1  | 2026-09-14 01:07:04,037:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,037:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,040:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+superset-1  | 2026-09-14 01:07:04,044:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,044:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,050:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,050:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,057:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,057:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,065:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,065:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,066:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+superset-1  | 2026-09-14 01:07:04,067:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+superset-1  | 2026-09-14 01:07:04,068:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+superset-1  | 2026-09-14 01:07:04,071:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+superset-1  | 2026-09-14 01:07:04,142:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+superset-1  | 2026-09-14 01:07:04,206:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,206:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,213:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+superset-1  | 2026-09-14 01:07:04,213:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,213:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,380:INFO:superset.app:Syncing configuration to database...
+superset-1  | 2026-09-14 01:07:04,385:INFO:superset.app:Configuration sync to database completed successfully
+superset-1  | 2026-09-14 01:07:04,570:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+superset-1  | 2026-09-14 01:07:04,578:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,578:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,580:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+superset-1  | 2026-09-14 01:07:04,584:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,584:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,590:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,590:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,596:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,596:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,602:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:04,602:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:04,603:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+superset-1  | 2026-09-14 01:07:04,613:INFO:superset_ownership.backfill:superset_ownership backfill: 2 candidate tenant role(s), 2 confirmed in the authorization store: ['a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40', 'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92']
+superset-1  | 2026-09-14 01:07:04,613:INFO:superset_ownership.backfill:superset_ownership backfill: 2 tenants found; not assigning unowned objects to a tenant administrator (cannot tell which tenant a legacy object belongs to)
+superset-1  | 2026-09-14 01:07:04,615:INFO:superset_ownership.backfill:superset_ownership backfill: 22 datasource(s) bound to a tenant
+superset-1  | 2026-09-14 01:07:05,092:INFO:superset_ownership.lifecycle:superset_ownership: reconcile -> {'checked': 120, 'owner_tuple_missing': 0, 'owner_tuple_wrong': 0, 'owner_tuple_written': 0, 'owner_tuple_removed': 0, 'share_tuples_without_row': 0, 'dry_run': False, 'share_rows_without_object': 0}
+superset-1  | 2026-09-14 01:07:05,336:INFO:superset_ownership.lifecycle:superset_ownership: reconcile -> {'checked': 120, 'owner_tuple_missing': 0, 'owner_tuple_wrong': 0, 'owner_tuple_written': 0, 'owner_tuple_removed': 0, 'share_tuples_without_row': 0, 'dry_run': True, 'share_rows_without_object': 0}
+superset-1  | superset_ownership backfill [dashboard]: 0 created, 0 re-attributed, 0 tenant stamped, 0 still UNOWNED
+superset-1  | superset_ownership backfill [chart]: 0 created, 0 re-attributed, 0 tenant stamped, 1 still UNOWNED
+superset-1  | superset_ownership backfill: 1 object(s) have no recoverable creator in this database (no created_by_fk, no changed_by_fk, no creating transaction in history) and no tenant administrator to fall back to. They stay public and readable, but cannot be SHARED until someone owns them. Set OWNERSHIP_DEFAULT_OWNER and re-run to assign a fallback owner, or let a tenant administrator claim them.
+superset-1  | superset_ownership backfill: default_owner=None
+superset-1  | [entrypoint-ownership] backfill summary: [dashboard]: 0 created, 0 re-attributed, 0 tenant stamped, 0 still UNOWNED;[chart]: 0 created, 0 re-attributed, 0 tenant stamped, 1 still UNOWNED
+superset-1  | [entrypoint-ownership] superset ownership backfill-tenants (stamp a tenant on any object the sweep above could not)
+superset-1  | Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+superset-1  | 2026-09-14 01:07:08,301:WARNING:superset.initialization:--------------------------------------------------------------------------------
+superset-1  |                                     WARNING
+superset-1  | --------------------------------------------------------------------------------
+superset-1  | 2026-09-14 01:07:08,301:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+superset-1  | Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+superset-1  |   1. Back up the metadata database.
+superset-1  |   2. superset re-encrypt-secrets --engine aes-gcm
+superset-1  |   3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+superset-1  |   4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+superset-1  | See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+superset-1  | 2026-09-14 01:07:08,301:WARNING:superset.initialization:--------------------------------------------------------------------------------
+superset-1  | --------------------------------------------------------------------------------
+superset-1  | 2026-09-14 01:07:08,320:INFO:superset.initialization:Registering blueprint: superset_ownership
+superset-1  | 2026-09-14 01:07:08,332:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+superset-1  |   warnings.warn(
+superset-1  | 
+superset-1  | 2026-09-14 01:07:08,597:INFO:superset.subjects.hooks:Subject sync hooks registered
+superset-1  | 2026-09-14 01:07:08,599:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+superset-1  | 2026-09-14 01:07:08,602:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+superset-1  | 2026-09-14 01:07:08,602:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+superset-1  | 2026-09-14 01:07:08,602:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+superset-1  | 2026-09-14 01:07:08,602:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+superset-1  | 2026-09-14 01:07:08,608:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:08,609:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:08,611:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+superset-1  | 2026-09-14 01:07:08,615:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:08,615:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:08,621:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:08,621:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:08,629:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:08,629:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:08,637:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:08,637:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:08,638:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+superset-1  | 2026-09-14 01:07:08,638:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+superset-1  | 2026-09-14 01:07:08,640:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+superset-1  | 2026-09-14 01:07:08,642:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+superset-1  | 2026-09-14 01:07:08,715:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+superset-1  | 2026-09-14 01:07:08,795:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:08,795:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:08,802:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+superset-1  | 2026-09-14 01:07:08,803:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+superset-1  | 2026-09-14 01:07:08,803:INFO:alembic.runtime.migration:Will assume transactional DDL.
+superset-1  | 2026-09-14 01:07:08,985:INFO:superset.app:Syncing configuration to database...
+superset-1  | 2026-09-14 01:07:08,990:INFO:superset.app:Configuration sync to database completed successfully
+superset-1  | 2026-09-14 01:07:09,177:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+superset-1  | 2026-09-14 01:07:09,185:INFO:superset_ownership.lifecycle:superset_ownership: backfilled object tenants -> {'written': 0, 'already_set': 6, 'no_owner': 0, 'no_tenant': 0, 'failed': 0}
+superset-1  | {
+superset-1  |   "already_set": 6,
+superset-1  |   "failed": 0,
+superset-1  |   "no_owner": 0,
+superset-1  |   "no_tenant": 0,
+superset-1  |   "written": 0
+superset-1  | }
+superset-1  | [entrypoint-ownership] superset ownership check
+superset-1  | Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+superset-1  | 2026-09-14 01:07:12,091:WARNING:superset.initialization:--------------------------------------------------------------------------------
+superset-1  |                                     WARNING
+superset-1  | --------------------------------------------------------------------------------
+superset-1  | 2026-09-14 01:07:12,091:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+superset-1  | Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+superset-1  |   1. Back up the metadata database.
+superset-1  |   2. superset re-encrypt-secrets --engine aes-gcm
+superset-1  |   3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+superset-1  |   4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+
+  --- superset ownership status ---
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:07:30,879:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:07:30,879:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:07:30,879:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:07:30,897:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:07:30,908:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:07:31,216:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:07:31,217:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:07:31,221:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:07:31,221:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:07:31,221:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:07:31,221:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:07:31,228:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:31,228:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:31,231:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:07:31,236:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:31,236:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:31,242:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:31,242:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:31,250:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:31,250:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:31,258:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:31,258:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:31,259:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:07:31,259:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:07:31,261:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:07:31,264:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:07:31,338:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:07:31,406:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:31,406:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:31,414:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:07:31,415:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:31,415:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:31,589:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:07:31,599:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:07:31,798:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+{
+  "audit_sink": false,
+  "backend_loaded": true,
+  "by_visibility": {
+    "private": 2,
+    "public": 114,
+    "shared": 4
+  },
+  "enabled_backend": true,
+  "enabled_ui": true,
+  "enabled_ui_runtime": true,
+  "fga_api_url": "http://openfga:8080",
+  "fga_model": "01M2DM00251TBWPNC5PHKHHDBS",
+  "fga_store": "01M2DKZP23H87R1WG10KJNZK61",
+  "flags_agree": true,
+  "group_id_format": "{name}_{tenant}",
+  "objects": 120,
+  "plugins": {
+    "authorizer": {
+      "alias": "openfga",
+      "class": "superset_ownership.authz:OpenFGAAuthorizer",
+      "protocol_version": 1,
+      "source": "config"
+    },
+    "degraded": [],
+    "directory": {
+      "alias": "openfga",
+      "class": "superset_ownership.directory:OpenFGADirectory",
+      "protocol_version": 1,
+      "source": "config"
+    },
+    "hooks": {
+      "OWNERSHIP_ADMINISTRATORS_OF_TENANT": {
+        "source": "default"
+      },
+      "OWNERSHIP_CAN_MANAGE": {
+        "source": "default"
+      },
+      "OWNERSHIP_DISPLAY_NAME": {
+        "source": "default"
+      },
+      "OWNERSHIP_GROUPS_OF_TENANT": {
+        "source": "default"
+      },
+      "OWNERSHIP_GROUP_DISPLAY_NAME": {
+        "source": "default"
+      },
+      "OWNERSHIP_GROUP_EXISTS": {
+        "source": "default"
+      },
+      "OWNERSHIP_GROUP_ID": {
+        "source": "default"
+      },
+      "OWNERSHIP_IS_TENANT_ADMINISTRATOR": {
+        "source": "default"
+      },
+      "OWNERSHIP_MEMBERS_OF_GROUP": {
+        "source": "default"
+      },
+      "OWNERSHIP_MEMBER_GUID": {
+        "source": "default"
+      },
+      "OWNERSHIP_SPLIT_GROUP_ID": {
+        "source": "default"
+      },
+      "OWNERSHIP_TENANT_ADMINISTRATOR_GROUP": {
+        "source": "default"
+      },
+      "OWNERSHIP_TENANT_GUID": {
+        "source": "default"
+      },
+      "OWNERSHIP_USERS_OF_TENANT": {
+        "source": "default"
+      },
+      "OWNERSHIP_USER_FOR_MEMBER_GUID": {
+        "source": "default"
+      },
+      "OWNERSHIP_USER_IN_GROUP": {
+        "source": "default"
+      }
+    },
+    "identity": {
+      "alias": "superset_ownership.identity:DefaultIdentity",
+      "class": "superset_ownership.identity:DefaultIdentity",
+      "protocol_version": 1,
+      "source": "default"
+    }
+  },
+  "shares": 4,
+  "ui_flag_hooked": false,
+  "ui_flag_hooks": []
+}
+
+  --- superset ownership plugin verify --tenant a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 ---
+Loaded your LOCAL configuration at [/app/pythonpath/superset_config_docker.py] (md5:6152310b3750)
+2026-09-14 01:07:35,083:WARNING:superset.initialization:--------------------------------------------------------------------------------
+                                    WARNING
+--------------------------------------------------------------------------------
+2026-09-14 01:07:35,084:WARNING:superset.initialization:SQLALCHEMY_ENCRYPTED_FIELD_ENGINE is set to the legacy 'aes' engine (AES-CBC, unauthenticated). App-encrypted fields — database passwords, SSH tunnel credentials, OAuth2 tokens, and similar — would benefit from the authenticated 'aes-gcm' engine instead.
+Switching engines on a populated database requires re-encrypting existing values first, since the two ciphertext formats are not interchangeable:
+  1. Back up the metadata database.
+  2. superset re-encrypt-secrets --engine aes-gcm
+  3. Set SQLALCHEMY_ENCRYPTED_FIELD_ENGINE = 'aes-gcm' in superset_config.py.
+  4. Restart Superset, then re-run the command above once more to sweep up any values written during the cutover.
+See UPDATING.md and docs/sip/authenticated-encryption-at-rest.md for the full runbook.
+2026-09-14 01:07:35,084:WARNING:superset.initialization:--------------------------------------------------------------------------------
+--------------------------------------------------------------------------------
+2026-09-14 01:07:35,102:INFO:superset.initialization:Registering blueprint: superset_ownership
+2026-09-14 01:07:35,113:WARNING:py.warnings:/app/.venv/lib/python3.11/site-packages/flask_limiter/extension.py:324: UserWarning: Using the in-memory storage for tracking rate limits as no storage was explicitly specified. This is not recommended for production use. See: https://flask-limiter.readthedocs.io#configuring-a-storage-backend for documentation about configuring the storage backend.
+  warnings.warn(
+
+2026-09-14 01:07:35,384:INFO:superset.subjects.hooks:Subject sync hooks registered
+2026-09-14 01:07:35,386:INFO:superset_ownership.flags:superset_ownership: OWNERSHIP_ENABLED=True FEATURE_FLAGS['OBJECT_OWNERSHIP']=True (one switch; the flag is derived from the setting)
+2026-09-14 01:07:35,389:INFO:superset_ownership.plugins:ownership: authorizer = superset_ownership.authz:OpenFGAAuthorizer (protocol v1, from config)
+2026-09-14 01:07:35,389:INFO:superset_ownership.plugins:ownership: directory = superset_ownership.directory:OpenFGADirectory (protocol v1, from config)
+2026-09-14 01:07:35,389:INFO:superset_ownership.plugins:ownership: identity = superset_ownership.identity:DefaultIdentity (protocol v1, from default)
+2026-09-14 01:07:35,389:INFO:superset_ownership.plugins:ownership: fga = http://openfga:8080 store=01M2DKZP23H87R1WG10KJNZK61 model=01M2DM00251TBWPNC5PHKHHDBS
+2026-09-14 01:07:35,396:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:35,396:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:35,399:INFO:superset_ownership.migrate:superset_ownership: chain upgraded to head
+2026-09-14 01:07:35,403:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:35,403:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:35,410:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:35,410:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:35,419:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:35,419:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:35,427:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:35,427:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:35,428:INFO:superset_ownership.db:superset_ownership: schema at 0003_ownership_foreign_keys
+2026-09-14 01:07:35,428:WARNING:superset_ownership.outbox:superset_ownership: the outbox is ENABLED but no Celery beat entry runs superset_ownership.outbox.drain. Sharing changes will queue and never reach the authorization store unless `superset ownership outbox drain` is run by something.
+2026-09-14 01:07:35,430:INFO:superset_ownership.guard:superset_ownership: viewers guard installed
+2026-09-14 01:07:35,433:INFO:superset_ownership.cli:superset_ownership: CLI registered (superset ownership --help)
+2026-09-14 01:07:35,507:INFO:superset_ownership.dashboard_patch:superset_ownership: dashboard-chart access marker installed
+2026-09-14 01:07:35,574:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:35,574:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:35,582:INFO:superset_ownership.lifecycle:superset_ownership: startup check ok
+2026-09-14 01:07:35,582:INFO:alembic.runtime.migration:Context impl PostgresqlImpl.
+2026-09-14 01:07:35,582:INFO:alembic.runtime.migration:Will assume transactional DDL.
+2026-09-14 01:07:35,749:INFO:superset.app:Syncing configuration to database...
+2026-09-14 01:07:35,754:INFO:superset.app:Configuration sync to database completed successfully
+2026-09-14 01:07:35,945:INFO:superset.core.mcp.core_mcp_injection:fastmcp is not installed, skipping MCP initialization. Install it with: pip install 'apache-superset[fastmcp]'
+2026-09-14 01:07:36,010:INFO:superset_ownership.fga:openfga write already satisfied writes=[{'user': 'user:verify-feb43a75-97f6-4a9d-a98c-ec9c7a7e4053', 'relation': 'viewer', 'object': 'chart:verify-feb43a75-97f6-4a9d-a98c-ec9c7a7e4053'}] deletes=None
+2026-09-14 01:07:36,015:INFO:superset_ownership.fga:openfga write already satisfied writes=None deletes=[{'user': 'user:verify-feb43a75-97f6-4a9d-a98c-ec9c7a7e4053', 'relation': 'viewer', 'object': 'chart:verify-feb43a75-97f6-4a9d-a98c-ec9c7a7e4053'}]
+== load ==
+  PASS plugins_load  authorizer, directory and identity all loaded
+== connection ==
+  PASS reachable  store answered
+  PASS model_pinned  pinned to 01M2DM00251TBWPNC5PHKHHDBS
+  PASS required_relations  every required type.relation is present
+  PASS scratch_tuple_roundtrip  write/write/delete/delete all succeeded
+== vocabulary ==
+  PASS group_has_tenant_tuple  every walked group has a tenant tuple
+  PASS member_guids_resolve  all 14 member(s) resolve to a Superset user
+  PASS administrator_group_exists  group:tenant_administrator_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 exists
+  PASS no_member_in_two_tenants  no member belongs to two tenants
+  PASS group_ids_parse  every listed group id parses
+  SKIP manage_permission_template  OWNERSHIP_MANAGE_PERMISSION is not set
+== directory ==
+  PASS tenant_isolation  a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 and b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 share no groups
+  PASS pagination_roundtrips  14 member(s), same set at both page sizes
+  SKIP not_found_vs_empty  no known-empty group in this tenant to probe
+  PASS user_in_group_agrees  90 pair(s) agree
+  PASS health  model 01M2DM00251TBWPNC5PHKHHDBS: group.tenant present
+  PASS latency  p95=1.7ms over 193 call(s)
+== identity ==
+  PASS guid_v4  10 sampled, all GUID v4
+  PASS tenant_known  10 sampled, all known
+  PASS normalize_subject_roundtrip  10 sampled, all round-trip
+== invariants ==
+  SKIP owner_zero_calls  pass --object and --as to run this section
+  SKIP non_owner_one_check  pass --object and --as to run this section
+  SKIP public_zero_calls  pass --object and --as to run this section
+== hooks ==
+  SKIP resolved  no hook configured
+  PASS shape_pair_roundtrip  11 group id(s) round-trip
+  SKIP caller_side  no hook configured
+  SKIP directory_side  no hook configured
+  SKIP read_only  no hook configured
+  SKIP can_manage_narrow_only  no hook configured
+  SKIP fail_closed  no hook configured
+SUMMARY pass=19 warn=0 fail=0 skip=11
+
+  --- proof queries ---
+--- ownership_object counts by visibility ---
+ visibility | count 
+------------+-------
+ private    |     2
+ public     |   114
+ shared     |     4
+(3 rows)
+
+--- ownership_object counts by owner's tenant (derived from the owner's tenant_<guid> role) ---
+                tenant                | objects 
+--------------------------------------+---------
+ a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 |      94
+ b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 |      25
+ (unowned)                            |       1
+(3 rows)
+
+--- every dashboard: owner + tenant + visibility ---
+ id |      dashboard_title       |     owner     |             owner_tenant             | visibility 
+----+----------------------------+---------------+--------------------------------------+------------
+  1 | Sales Dashboard            | Marcus Chen   | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | public
+  2 | Misc Charts                | Omar Farouk   | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | public
+  3 | Featured Charts            | Priya Sharma  | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | public
+  4 | Slack Dashboard            | Hannah Berg   | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | public
+  5 | World Bank's Data          | Diego Alvarez | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | public
+  6 | FCC New Coder Survey 2018  | Elena Rossi   | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | public
+  7 | USA Births Names           | Ada tenant A  | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | public
+  8 | Video Game Sales           | Ada tenant A  | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | public
+  9 | deck.gl Demo               | David Okafor  | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | public
+ 10 | Tenant A Device Compliance | Ada tenant A  | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | public
+ 11 | Tenant B Device Compliance | Cleo tenant B | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | public
+(11 rows)
+
+--- per dashboard: datasets its charts use, and which tenant(s) can read them (via RLS binding) ---
+ dashboard_id |      dashboard_title       |        dataset         |                             readable_by_tenant                             
+--------------+----------------------------+------------------------+----------------------------------------------------------------------------
+            1 | Sales Dashboard            | cleaned_sales_data     | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40, b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            2 | Misc Charts                | birth_france_by_region | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            2 | Misc Charts                | wb_health_population   | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            3 | Featured Charts            | cleaned_sales_data     | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40, b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            3 | Featured Charts            | project_management     | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            4 | Slack Dashboard            | members_channels_2     | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            4 | Slack Dashboard            | messages_channels      | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            4 | Slack Dashboard            | threads                | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            4 | Slack Dashboard            | users                  | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            5 | World Bank's Data          | wb_health_population   | b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            6 | FCC New Coder Survey 2018  | FCC 2018 Survey        | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40
+            7 | USA Births Names           | birth_names            | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40, b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            8 | Video Game Sales           | video_game_sales       | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40, b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+            9 | deck.gl Demo               | bart_lines             | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40
+            9 | deck.gl Demo               | long_lat               | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40
+            9 | deck.gl Demo               | sf_population_polygons | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40
+           10 | Tenant A Device Compliance | neurons_devices        | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40, b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+           11 | Tenant B Device Compliance | neurons_devices        | a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40, b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92
+(18 rows)
+
+--- RLS filter table: dataset, role, clause ---
+          dataset          |                    role                     |                       clause                       
+---------------------------+---------------------------------------------+----------------------------------------------------
+ bart_lines                | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ birth_france_by_region    | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+ birth_names               | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | tenant_id = 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'
+ birth_names               | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | tenant_id = 'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'
+ cleaned_sales_data        | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | tenant_id = 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'
+ cleaned_sales_data        | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | tenant_id = 'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'
+ FCC 2018 Survey           | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ flights                   | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+ hierarchical_dataset      | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ international_sales       | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+ long_lat                  | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ members_channels_2        | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+ messages                  | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ messages_channels         | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+ neurons_devices           | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | tenant_id = 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'
+ neurons_devices           | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | tenant_id = 'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'
+ new_members_daily         | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ project_management        | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+ sf_population_polygons    | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ threads                   | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+ unicode_test              | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ users                     | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+ users_channels-uzooNNtSRO | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 1 = 1
+ video_game_sales          | tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | tenant_id = 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40'
+ video_game_sales          | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | tenant_id = 'b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92'
+ wb_health_population      | tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 1 = 1
+(26 rows)
+
+--- RLS filter count per tenant role ---
+                 tenant_role                 | rls_filters 
+---------------------------------------------+-------------
+ tenant_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 |          13
+ tenant_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 |          13
+(2 rows)
+
+--- alembic_version vs alembic_version_ownership ---
+   chain   |         version_num         
+-----------+-----------------------------
+ core      | 39097d124752
+ ownership | 0003_ownership_foreign_keys
+(2 rows)
+
+--- cleaned_sales_data: count(*) by tenant_id (real row-level tenancy, examples_scratch DB) ---
+              tenant_id               | count 
+--------------------------------------+-------
+ a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 |  2666
+ b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 |   157
+(2 rows)
+
+--- birth_names: count(*) by tenant_id ---
+              tenant_id               | count 
+--------------------------------------+-------
+ a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 | 20170
+ b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 55521
+(2 rows)
+
+--- video_game_sales: count(*) by tenant_id ---
+              tenant_id               | count 
+--------------------------------------+-------
+ a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 |  4363
+ b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 | 12232
+(2 rows)
+
+--- neurons_devices: count(*) by tenant_id ---
+              tenant_id               | count 
+--------------------------------------+-------
+ a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 |   200
+ b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92 |   200
+(2 rows)
+
+
+--- API proof: same shared chart, two tenant users, RLS-scoped row counts ---
+  chart under test: id=1 (cleaned_sales_data, datasource=3)
+  wrote a minimal query_context onto chart 1 (COUNT(*) over cleaned_sales_data, no groupby)
+  Ada  (tenant A) (3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31): rowcount=1 data=[{'count': 2666}]
+  Cleo (tenant B) (9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76): rowcount=1 data=[{'count': 157}]
+  (compare these row counts against the cleaned_sales_data tenant_id split above -- they must differ and match)
+
+scratch stack is up: http://localhost:8097  (superset_scratch DB, store 01M2DKZP23H87R1WG10KJNZK61)
+logins: admin/admin, Ada 3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31, Cleo 9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76 -- password test1234 for every seeded tenant user.

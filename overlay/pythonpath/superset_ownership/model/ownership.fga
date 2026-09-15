@@ -1,0 +1,47 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# Rendered by superset_ownership.model.render_dsl(MODEL) -- do not hand-edit;
+# a test pins the two equal. See model/__init__.py for the JSON source of
+# truth and superset ownership fga install-model to write it to a store.
+
+model
+  schema 1.1
+
+type user
+
+type tenant
+  relations
+    define member: [user]
+
+type group
+  relations
+    define member: [user, group#member]
+    define tenant: [tenant#member]
+
+type dashboard
+  relations
+    define owner: [user]
+    define editor: [user, group#member] or owner
+    define viewer: [user, group#member] or editor
+    define tenant: [tenant#member]
+
+type chart
+  relations
+    define owner: [user]
+    define editor: [user, group#member] or owner
+    define viewer: [user, group#member] or editor
+    define tenant: [tenant#member]

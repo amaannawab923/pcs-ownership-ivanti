@@ -1,0 +1,12 @@
+=== supplementary evidence for scratch-run.md (pcs-ownership:wheel) ===
+--- superset_ownership.__file__
+pcssetup-superset-1: /app/.venv/lib/python3.11/site-packages/superset_ownership/__init__.py
+pcssetup-worker-1: /app/.venv/lib/python3.11/site-packages/superset_ownership/__init__.py
+--- superset ownership check (pcssetup-superset-1)
+  "backend_loaded": true,
+  "dashboard_chart_patch_installed": true,
+  "flags_agree": true,
+  "ok": true,
+exit=0
+--- Cleo dashboards
+count 8 ["World Bank's Data", 'Slack Dashboard', 'Featured Charts']

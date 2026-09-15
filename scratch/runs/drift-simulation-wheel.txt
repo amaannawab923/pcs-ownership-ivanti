@@ -1,0 +1,19 @@
+throwaway sqlite schema ready
+--- healthy: ownership check
+exit=0
+  "dashboard_chart_patch_installed": true,
+  "ok": true,
+--- drift simulated (pin broken from the config file): ownership check
+exit=1
+  "dashboard_chart_patch_installed": false,
+  "ok": false,
+dashboard-chart access marker NOT installed
+--- drift simulated: create_app() (web/worker)
+exit=1
+DashboardPatchError: superset/dashboards/api.py: _serialize_dashboard_chart source changed upstream 
+--- drift simulated: ownership status (maintenance)
+exit=0
+ERROR lines mentioning NOT installed: 1
+--- drift simulated: ownership backfill-tenants (writes data)
+exit=1
+DashboardPatchError

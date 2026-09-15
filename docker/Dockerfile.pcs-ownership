@@ -1,0 +1,164 @@
+# (syntax directive removed: BuildKit v0.18 builtin frontend supports --build-context; pinning docker/dockerfile:1.7 forces a registry pull at build time)
+#
+# PCS-10243 object ownership & sharing -- the "step 2" overlay build.
+#
+# Two-step picture:
+#   step 1 (docker/build.sh / setup.sh, NOT this file): build the stock PCS
+#           image the client already runs -- `docker build --target lean`
+#           against an untouched PCS source tree. That image is PCS_IMAGE.
+#   step 2 (this file): rebuild ONLY the frontend bundle (from the SAME
+#           stock source tree, an additional build context named "pcs-src",
+#           with this shell's overlay/frontend/ applied over it), build the
+#           superset-ownership wheel, then layer the rebuilt assets + the
+#           wheel + the config shim onto PCS_IMAGE. No file under
+#           /app/superset is overwritten: the backend installs as a
+#           package and wires itself in at runtime. superset-oss /
+#           PCS_IMAGE itself is never modified: a PCS version bump is
+#           steps 1+2 again, not a merge.
+#
+# Build with docker/build.sh (which setup.sh calls), or directly:
+#   docker build -f docker/Dockerfile.pcs-ownership \
+#     --build-arg PCS_IMAGE=pcs-stock:v6.1.0.7 \
+#     --build-context pcs-src=.pcs-src \
+#     -t pcs-ownership:dev .
+
+ARG PCS_IMAGE
+ARG NPM_BUILD_CMD="build"
+
+######################################################################
+# frontend -- rebuilds superset-frontend from the stock PCS source tree
+# (the "pcs-src" additional build context) with overlay/frontend/ applied
+# over it before the webpack build runs. Mirrors the stock Dockerfile's own
+# node stage (node:24-trixie-slim, npm ci then `npm run build`).
+######################################################################
+FROM node:24-trixie-slim AS frontend
+ARG NPM_BUILD_CMD
+ENV BUILD_CMD=${NPM_BUILD_CMD} \
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential python3 zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /app/superset/static/assets /app/superset/translations
+WORKDIR /app/superset-frontend
+
+# Same registry-blip hardening as the stock Dockerfile.
+ENV npm_config_fetch_retries=5 \
+    npm_config_fetch_retry_mintimeout=20000 \
+    npm_config_fetch_retry_maxtimeout=120000 \
+    npm_config_fetch_timeout=600000
+
+COPY --from=pcs-src superset-frontend/package.json ./package.json
+COPY --from=pcs-src superset-frontend/package-lock.json ./package-lock.json
+
+# `npm ci` first; if the stock tree's lock has drifted (a known stock
+# defect reproduced from the pcs-ivanti spike -- see README) fall back to
+# `npm install` rather than fail the whole build, and say so loudly.
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci || { \
+      echo "WARNING: npm ci failed (lock drift in the stock PCS tree -- see README's" >&2; \
+      echo "WARNING: 'known stock defects' section). Falling back to npm install." >&2; \
+      npm install --no-audit --no-fund; \
+    }
+
+# The full stock frontend source tree, THEN this shell's overlay directly on
+# top of it -- same order and reasoning as the pcs-ivanti spike: overlay
+# lands right before the build so nothing downstream can observe the
+# pre-overlay files, and superset-frontend itself (the pcs-src context) is
+# never written to.
+COPY --from=pcs-src superset-frontend /app/superset-frontend
+COPY overlay/frontend/ /app/superset-frontend/
+
+RUN npm run ${BUILD_CMD}
+
+######################################################################
+# wheel-builder -- the superset-ownership wheel, built from the overlay
+# module exactly as packaging/build-wheel.sh does it (pyproject.toml lives
+# in packaging/, the module in overlay/pythonpath/, assembled here). Plain
+# python:3.11-slim, so `pip` is fine in THIS stage; the PCS venv below
+# ships uv, not pip. Ivanti's own pipeline may build+sign the wheel in a
+# separate audited step and COPY it in instead -- swap this stage for
+# `COPY <prebuilt>/*.whl /wheel/` and nothing else here changes.
+######################################################################
+FROM python:3.11-slim AS wheel-builder
+RUN pip install --no-cache-dir "build==1.2.2" "hatchling==1.27.0"
+WORKDIR /src
+COPY packaging/superset-ownership/pyproject.toml packaging/superset-ownership/README.md ./
+COPY overlay/pythonpath/superset_ownership ./superset_ownership
+RUN find . -name __pycache__ -prune -exec rm -rf {} + \
+ && python -m build --wheel --no-isolation --outdir /wheel \
+ && ls -1 /wheel
+
+######################################################################
+# final -- the initialized stock PCS image (step 1), with the freshly
+# built frontend assets, the superset-ownership wheel (in the image's own
+# venv) and the config shim layered on top. Nothing under /app/superset
+# is overwritten.
+######################################################################
+FROM ${PCS_IMAGE} AS final
+USER root
+
+# --- drift guard --------------------------------------------------------
+# Nothing under /app/superset is overwritten any more (the backend is a
+# wheel, see below), so there is no backend replace-file to guard here.
+# Frontend replace-files are checked against the pcs-src context by
+# scripts/apply-overlay.sh in setup.sh's step 3 (from-source builds that
+# skip setup.sh must run that script first). The one backend dependency on
+# stock code -- the dashboard-tile access marker's wrap of
+# DashboardRestApi._serialize_dashboard_chart -- is asserted against THIS
+# image's installed superset in step 3 below, at build time.
+
+# --- 1. frontend: only the built bundle, not the source tree ---------------
+COPY --from=frontend /app/superset/static/assets /app/superset/static/assets
+
+# --- 2. backend: the wheel, into the image's own venv -----------------------
+# --no-deps: the host venv is already fully pinned by PCS; a resolving
+# install could move a Superset-pinned dependency. Everything the package
+# imports is already there (see packaging/superset-ownership/pyproject.toml).
+COPY --from=wheel-builder /wheel/*.whl /tmp/
+RUN uv pip install --python /app/.venv/bin/python --no-deps --compile-bytecode /tmp/superset_ownership-*.whl \
+ && rm -f /tmp/superset_ownership-*.whl
+
+# --- 3. build-time assertion: the stock method the wrap pins is the one this
+# wheel was built against. Hard fail -- better to stop the build than to
+# ship an image whose only safety net is the boot-time check. Read from the
+# installed file, not a live import: superset.dashboards.api cannot be
+# imported without an initialised app, and a build step has none.
+RUN /app/.venv/bin/python -c "\
+from superset_ownership.dashboard_patch import assert_stock_file; \
+assert_stock_file(); print('dashboard patch pins: ok')"
+
+# --- 4. pythonpath: individual entries, NEVER the whole directory ----------
+# (the pcs-ivanti spike's shadowing trap: a directory-level COPY or bind
+# mount over the image's own PYTHONPATH entry hides everything already
+# there. PYTHONPATH on the stock image is /app/pythonpath -- python-common
+# stage in the stock Dockerfile.) superset_ownership itself is NOT copied:
+# it is the wheel above, and a stale pythonpath copy would shadow it.
+COPY overlay/pythonpath/superset_config_ownership.py /app/pythonpath/superset_config_ownership.py
+COPY overlay/pythonpath/ivanti_pcs_example /app/pythonpath/ivanti_pcs_example
+
+RUN python -m compileall -q /app/pythonpath/superset_config_ownership.py \
+      /app/pythonpath/ivanti_pcs_example || true
+
+# NOT part of the overlay proper -- a Postgres driver. `requirements/base.txt`
+# treats it as an optional extra (`apache-superset[postgres]`), and the
+# stock `lean` Dockerfile target this shell's own step 1 builds does not
+# install it either (only the dev image's docker-bootstrap.sh does, at
+# container start, for DATABASE_DIALECT=postgres*). A real client PCS image
+# already talks to their production Postgres, so it already has this (or
+# an equivalent driver) one way or another; this line exists only so this
+# shell's OWN demo compose stack (docker-compose.pcs-setup.yml, a real
+# Postgres) has something to connect with. Safe / a fast no-op if PCS_IMAGE
+# already provides a Postgres driver.
+RUN uv pip install --python /app/.venv/bin/python psycopg2-binary==2.9.12
+
+# --- 5. entrypoint ----------------------------------------------------------
+COPY --chmod=755 docker/entrypoint-ownership.sh /app/docker/entrypoint-ownership.sh
+
+# Keep the stock user/workdir/port/healthcheck; only the entrypoint changes
+# (it execs the stock command after the ownership migration + check).
+USER superset
+WORKDIR /app
+ENTRYPOINT ["/app/docker/entrypoint-ownership.sh"]
+CMD ["app"]

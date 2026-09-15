@@ -1,0 +1,18 @@
+{
+  "connection": null,
+  "effective_settings": {
+    "OWNERSHIP_AUTO_MIGRATE": true,
+    "OWNERSHIP_DIRECTORY_GROUP_WALK": "auto",
+    "OWNERSHIP_DIRECTORY_GROUP_WALK_TTL": 300,
+    "OWNERSHIP_GROUP_ID_FORMAT": "{name}_{tenant}",
+    "OWNERSHIP_LOOKUP_CACHE_TTL": null,
+    "OWNERSHIP_MANAGE_PERMISSION": null,
+    "OWNERSHIP_OUTBOX_ENABLED": true
+  },
+  "failures": {},
+  "resolved": {
+    "authorizer": "superset_ownership.authz:LocalAuthorizer",
+    "directory": "superset_ownership.directory:LocalDirectory",
+    "identity": "superset_ownership.identity:DefaultIdentity"
+  }
+}

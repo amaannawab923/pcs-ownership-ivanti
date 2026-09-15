@@ -1,0 +1,36 @@
+== 1. backfilled ownership as OpenFGA/Superset see it (Ada's dashboards)
+  total rows: 11
+   1 public None
+   2 public None
+   3 public None
+   4 public None
+  dashboard under test: 7 (owned by Ada)
+  record: {'visibility': 'public', 'owner': {'email': '3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31@ivanti.example', 'guid': '3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31', 'id': 2, 'name': 'Ada tenant A'}, 'can_manage': True, 'shares': []}
+== 2. public: everyone in the tenant scope can open it
+  Ada 200  Ben 200  Cleo(tenant B) 200
+== 3. Ada -> private
+{"object_id":7,"visibility":"private"}
+
+  Ada 200  Ben 404  Cleo 404
+== 4. Ben cannot change what he does not own
+  Ben PUT visibility -> 403
+== 5. Ada -> shared with Ben (viewer)
+{"object_id":7,"role":"viewer","subject":"user:6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53"}
+
+  Ada 200  Ben 200  Cleo 404
+== 6. the share is a real tuple in the STANDALONE OpenFGA (store from scratch/.scratch-out/store.env)
+   tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member tenant dashboard:02543e07-662…
+   user:3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31 owner dashboard:02543e07-662…
+   user:6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53 viewer dashboard:02543e07-662…
+== 7. back to private revokes the share (#93)
+  Ben 404   share on a private object -> 409
+== 8. transfer ownership Ada -> Ben, then Ben owns it
+{"object_id":7,"owner_user_id":3}
+
+  Ben sees owner: {'email': '6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53@ivanti.example', 'guid': '6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53', 'id': 3, 'name': 'Ben tenant A'} can_manage: True
+  Ada (tenant admin) 404  Ben (owner) 200  Cleo 404
+== 9. restore: Ben -> public, back to Ada
+  Cleo 200   dashboard 1 (Marcus) restored: Cleo 200
+  "ok": true,
+  "orphaned_sentinel": [],
+  "silently_open": [],

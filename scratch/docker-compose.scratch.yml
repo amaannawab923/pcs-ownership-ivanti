@@ -1,0 +1,128 @@
+# PCS-10243 "scratch" brownfield overlay on top of docker-compose.pcs-setup.yml.
+#
+# Same compose project (pcssetup), same postgres/redis/openfga services --
+# only the `superset`, `worker` and `init` services are repointed at a
+# SEPARATE metadata database (superset_scratch), a SEPARATE examples
+# database (examples_scratch -- see below), and a SEPARATE OpenFGA store
+# (created by scratch/seed-multitenant.sh's "store" step, id read from
+# scratch/.scratch-out/store.env and exported as SCRATCH_OPENFGA_STORE_ID /
+# SCRATCH_OPENFGA_MODEL_ID before any `docker compose ... up`/`run` below).
+# Both databases are created by the one-shot `scratch-db` service below, on
+# the SAME postgres service the demo DB (`superset`) already lives on.
+#
+# Usage (always both -f flags, in this order):
+#   docker compose -p pcssetup \
+#     -f docker-compose.pcs-setup.yml -f scratch/docker-compose.scratch.yml \
+#     <cmd>
+#
+# This REPLACES the demo stack's superset/worker containers (same names,
+# same port 8097) -- it does not run alongside the demo store/DB. That is
+# intentional: the deliverable is "the image tested against a brownfield
+# multi-tenant instance", not two stacks running at once. postgres/redis/
+# openfga (and the demo OpenFGA store already in that instance) are
+# untouched; only two extra databases are added to the same postgres server.
+#
+# examples_scratch, and WHY: the stock `SQLALCHEMY_EXAMPLES_URI` default is
+# a SQLite file inside the container's own (non-volume, non-persistent)
+# filesystem -- `superset load_examples` running in the one-off `init`
+# container writes it THERE, and it is gone the moment that container
+# exits. The `superset`/`worker` containers this script brings up next
+# start with a fresh, empty SQLite file of their own: the example TABLES
+# (their data rows, not just the dataset/dashboard/chart metadata already
+# in superset_scratch) would be unreadable, and scratch/seed_tenant_data.py
+# could not ALTER TABLE them. SUPERSET__SQLALCHEMY_EXAMPLES_URI (read by
+# superset/config.py's own env-override block, unconditionally, after any
+# config file) repoints the "examples" connection at a real Postgres
+# database instead, on the same server superset_scratch is on -- durable
+# across every container recreation in this pipeline, and safe for
+# `superset`/`worker`/one-off `init` runs to all read/write concurrently
+# (unlike a SQLite file under concurrent access from more than one
+# container).
+name: pcssetup
+
+services:
+  # One-shot: create the superset_scratch AND examples_scratch databases on
+  # the SAME postgres service the demo DB (`superset`) already lives on, if
+  # they don't exist yet. Mirrors the base compose file's own
+  # openfga-db-init pattern.
+  scratch-db:
+    image: postgres:17
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        until pg_isready -h postgres -U superset; do sleep 1; done
+        # Create-if-missing ONLY: compose re-runs this one-shot every time
+        # superset comes up (depends_on), so it must never drop anything.
+        # The seed script drops the two databases itself, once, in step 1.
+        for db in superset_scratch examples_scratch; do
+          psql -h postgres -U superset -tc "SELECT 1 FROM pg_database WHERE datname = '$$db'" | grep -q 1 || \
+            psql -h postgres -U superset -c "CREATE DATABASE $$db"
+        done
+    environment:
+      PGPASSWORD: superset
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # OWNERSHIP_ENABLED here (default "true", the base compose file's own
+  # hardcoded value) is overridable via SCRATCH_OWNERSHIP_ENABLED so
+  # seed-multitenant.sh can seed content + tenant users + attribution + RLS
+  # on a BROWNFIELD instance -- the switch off, exactly a real pre-feature
+  # customer database -- and only flip it true afterwards, once, so the
+  # ownership migration's backfill runs over already-attributed data
+  # instead of admin (see scratch/README.md's "ordering matters" note and
+  # entrypoint-ownership.sh's own comment on why the backfill never
+  # overwrites a row that already has an owner).
+  #
+  # The volumes: block replaces docker/demo-superset-config-docker.py at
+  # the active SUPERSET_CONFIG_PATH with scratch/scratch-superset-config-
+  # docker.py, which wraps it verbatim (mounted here under a neutral name
+  # so the wrapper can `exec` it) and adds one explicit setting -- see that
+  # file's own header.
+  superset:
+    environment:
+      DATABASE_DB: superset_scratch
+      SUPERSET_LOAD_EXAMPLES: "yes"
+      SUPERSET__SQLALCHEMY_EXAMPLES_URI: postgresql+psycopg2://superset:superset@postgres:5432/examples_scratch
+      OWNERSHIP_ENABLED: "${SCRATCH_OWNERSHIP_ENABLED:-true}"
+      OPENFGA_STORE_ID: "${SCRATCH_OPENFGA_STORE_ID:-}"
+      OPENFGA_MODEL_ID: "${SCRATCH_OPENFGA_MODEL_ID:-}"
+    volumes:
+      - ./scratch/scratch-superset-config-docker.py:/app/pythonpath/superset_config_docker.py:ro
+      - ./docker/demo-superset-config-docker.py:/app/pythonpath/demo-superset-config-docker.py:ro
+      - ./overlay/config/superset_config_docker.example.py:/app/pythonpath/superset_config_docker.example.py:ro
+      - pcssetup-uploads:/app/superset_home/uploads
+    depends_on:
+      scratch-db:
+        condition: service_completed_successfully
+
+  worker:
+    environment:
+      DATABASE_DB: superset_scratch
+      SUPERSET__SQLALCHEMY_EXAMPLES_URI: postgresql+psycopg2://superset:superset@postgres:5432/examples_scratch
+      OWNERSHIP_ENABLED: "${SCRATCH_OWNERSHIP_ENABLED:-true}"
+      OPENFGA_STORE_ID: "${SCRATCH_OPENFGA_STORE_ID:-}"
+      OPENFGA_MODEL_ID: "${SCRATCH_OPENFGA_MODEL_ID:-}"
+    volumes:
+      - ./scratch/scratch-superset-config-docker.py:/app/pythonpath/superset_config_docker.py:ro
+      - ./docker/demo-superset-config-docker.py:/app/pythonpath/demo-superset-config-docker.py:ro
+      - ./overlay/config/superset_config_docker.example.py:/app/pythonpath/superset_config_docker.example.py:ro
+    depends_on:
+      scratch-db:
+        condition: service_completed_successfully
+
+  init:
+    environment:
+      DATABASE_DB: superset_scratch
+      SUPERSET_LOAD_EXAMPLES: "yes"
+      SUPERSET__SQLALCHEMY_EXAMPLES_URI: postgresql+psycopg2://superset:superset@postgres:5432/examples_scratch
+      OWNERSHIP_ENABLED: "${SCRATCH_OWNERSHIP_ENABLED:-true}"
+      OPENFGA_STORE_ID: "${SCRATCH_OPENFGA_STORE_ID:-}"
+      OPENFGA_MODEL_ID: "${SCRATCH_OPENFGA_MODEL_ID:-}"
+    volumes:
+      - ./scratch/scratch-superset-config-docker.py:/app/pythonpath/superset_config_docker.py:ro
+      - ./docker/demo-superset-config-docker.py:/app/pythonpath/demo-superset-config-docker.py:ro
+      - ./overlay/config/superset_config_docker.example.py:/app/pythonpath/superset_config_docker.example.py:ro
+    depends_on:
+      scratch-db:
+        condition: service_completed_successfully

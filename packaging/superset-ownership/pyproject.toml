@@ -1,0 +1,57 @@
+# Build metadata for the `superset-ownership` wheel (PCS-10243 object
+# ownership & sharing). The package source is NOT beside this file: it lives
+# at overlay/pythonpath/superset_ownership/, which scripts/sync-from-main.sh
+# regenerates from client-test/main. packaging/build-wheel.sh (and the
+# Dockerfile's wheel-builder stage) assemble the two into one build root
+# before invoking the backend, so the overlay tree stays byte-identical to
+# main and this file stays out of the synced module.
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "superset-ownership"
+version = "0.3.0"
+description = "Object ownership and sharing for Apache Superset / Preset PCS, authorized by OpenFGA"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+  # Host-provided: this package only ever runs inside a Superset / PCS
+  # virtualenv, which already pins every one of these (requirements/base.txt)
+  # and supplies `superset` itself, which is not on PyPI and so cannot be
+  # listed. The image installs the wheel with --no-deps; this list documents
+  # the floor for a dev checkout and never drives a resolver pass against
+  # the host venv.
+  "flask>=2.3,<3",
+  "flask-appbuilder>=5.2,<6",
+  "flask-login>=0.6,<0.7",
+  "flask-jwt-extended>=4.7,<5",
+  "flask-wtf>=1.2,<2",
+  "sqlalchemy>=2.0,<2.1",
+  "alembic>=1.15,<2",
+  "click>=8.4,<9",
+  "requests>=2.33,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["superset_ownership"]
+exclude = [
+  "superset_ownership/tests/**",
+  "superset_ownership/UPDATING.md",
+  "**/__pycache__/**",
+]
+
+# Non-.py files the package ships: alembic.ini and script.py.mako are read
+# by the migration chain at runtime; ownership.fga is the authorization
+# model the store is loaded from (`superset ownership fga`). hatchling would
+# include them with the package anyway; naming them makes a build from the
+# wrong root (an empty wheel) fail here instead of at first
+# `superset ownership db upgrade` on a customer image.
+[tool.hatch.build.targets.wheel.force-include]
+"superset_ownership/migrations/alembic.ini" = "superset_ownership/migrations/alembic.ini"
+"superset_ownership/migrations/script.py.mako" = "superset_ownership/migrations/script.py.mako"
+"superset_ownership/model/ownership.fga" = "superset_ownership/model/ownership.fga"

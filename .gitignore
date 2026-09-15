@@ -1,0 +1,11 @@
+# stock PCS source tree, fetched by scripts/fetch-pcs.sh -- never committed
+.pcs-src/
+
+# per-run demo store id / model id, written by docker/seed.sh
+.seed-out/
+
+# per-run scratch store id / model id, written by scratch/seed-multitenant.sh
+scratch/.scratch-out/
+
+# wheel build output of packaging/build-wheel.sh -- never committed
+dist/
