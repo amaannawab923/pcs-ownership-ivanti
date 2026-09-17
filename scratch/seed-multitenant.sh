@@ -51,9 +51,10 @@
 #      neither hardcodes FGA/STORE/PYTHONPATH, both resolve the connection
 #      from the running app's own config, which already points at the
 #      scratch store) plus this repo's own scratch/seed_fga_extra.py
-#      (group `tenant` relation tuples, tenant_administrator_<tenant>
-#      groups, nested membership -- additive, NOT a change to the
-#      overlay/qa scripts; see that file's header)
+#      (what Neurons' platform writes: the identity members' tenant
+#      membership, each tenant's administrator as `admin` on the tenant
+#      object, one nested group per tenant -- additive, NOT a change to
+#      the overlay/qa scripts; see that file's header)
 #   5. scratch/seed_tenant_data.py: real row-level tenancy. THREE shared
 #      example datasets get a genuine `tenant_id` column + RLS per tenant
 #      role (both tenants can read them, different rows); every other

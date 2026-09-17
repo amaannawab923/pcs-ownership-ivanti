@@ -26,6 +26,7 @@ type user
 type tenant
   relations
     define member: [user]
+    define admin: [user, group#member]
 
 type group
   relations

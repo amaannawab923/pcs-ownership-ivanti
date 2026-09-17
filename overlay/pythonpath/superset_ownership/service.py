@@ -2240,6 +2240,7 @@ def subject_display_name(subject: str) -> str:
         display_name,
         group_display_name,
         resolve_member_guid,
+        subject_ids_match,
         user_for_member_guid,
     )
 
@@ -2257,7 +2258,9 @@ def subject_display_name(subject: str) -> str:
         info = get_user_info(int(ref))
         return info["name"] if info else subject
 
-    user = security_manager.find_user(username=ref)
+    from superset_ownership.identity import member_guid_of_subject_id
+
+    user = security_manager.find_user(username=member_guid_of_subject_id(ref) or ref)
     if user is None:
         # R3-M1: on the class-seam path the reverse lookup is the plug-in's
         # own code and can raise anything (the hook path already fails
@@ -2267,8 +2270,7 @@ def subject_display_name(subject: str) -> str:
         try:
             candidate = user_for_member_guid(ref)
             if candidate is not None:
-                found_guid = resolve_member_guid(candidate)
-                if found_guid is not None and found_guid.lower() == ref.lower():
+                if subject_ids_match(resolve_member_guid(candidate), ref):
                     user = candidate
         except Exception as exc:  # noqa: BLE001 - identity seam (I-2)
             logger.warning(

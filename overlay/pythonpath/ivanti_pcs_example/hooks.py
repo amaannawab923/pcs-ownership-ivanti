@@ -444,11 +444,20 @@ def user_in_group(  # noqa: A001 - `member_guid` is the contract's own arg name
     variant of its own -- a transport failure inside it is already logged
     there and answered `False`, the same fail-closed answer this hook would
     give had it raised instead, so nothing further is needed here.
+
+    `member_guid` arrives as the store id (`<tenant>.<member>` for a member
+    of a tenant). `group_id` is a group id (`<tenant>.<name>`, with or
+    without `group:`) OR a userset: `tenant:<t>#admin` is what the
+    tenant-administrator question asks about (Neurons' shape), so the
+    object and relation are taken apart with `split_userset` rather than
+    assumed to be a group's `member`.
     """
     from superset_ownership import fga
+    from superset_ownership.identity import split_userset
 
-    obj = group_id if group_id.startswith("group:") else f"group:{group_id}"
-    return fga.check(f"user:{member_guid}", "member", obj)
+    ref = group_id if ":" in group_id.split("#", 1)[0] else f"group:{group_id}"
+    obj, relation = split_userset(ref)
+    return fga.check(f"user:{member_guid}", relation, obj)
 
 
 def group_exists(group_id: str) -> bool:
@@ -527,15 +536,16 @@ def administrators_of_tenant(tenant: str) -> list[dict[str, Any]]:
 
 # --------------------------------------------------------------------------- shape-side
 #
-# Pure, no I/O. Implements the contract's default `{name}_{tenant}` layout
+# Pure, no I/O. Implements the pre-confirmation `{name}_{tenant}` layout
 # EXPLICITLY -- not by delegating to `superset_ownership.identity`'s own
 # `_default_group_id`/`_default_split_group_id` -- so this pair proves the
 # shape hooks are the seam, not a relabelled call into the code they stand
 # in for. `group_id`/`split_group_id` are exact inverses of each other (the
-# contract's own requirement, §4.5.2) and consistent with the tuples the
-# acceptance store already holds: `OWNERSHIP_GROUP_ID_FORMAT`'s default is
-# this same `{name}_{tenant}` layout, so a store seeded under the default
-# format still parses under these hooks.
+# contract's own requirement, §4.5.2). NOTE: the module's default is now
+# Neurons' `{tenant}.{name}` (PCS-10243, confirmed by Ivanti); a deployment
+# that configures these two hooks gets the `{name}_{tenant}` layout instead,
+# which is exactly what a shape hook is for -- a store written in another
+# layout than the default. Configure them only with a store written that way.
 
 _GUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",

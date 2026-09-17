@@ -52,7 +52,7 @@ write_tuples() {
     -d "{\"writes\":{\"tuple_keys\":$1}}" >/dev/null
 }
 
-echo "==> writing tenant vocabulary: 2 tenants, 4 users, 2 groups"
+echo "==> writing tenant vocabulary: 2 tenants, 4 users, 2 groups, 2 tenant administrators (Neurons shapes)"
 # Ivanti's authorization facts are keyed on GUID v4 for BOTH tenant and
 # member (identity.py's GUID_RE; `plugin verify`'s administrator_group_exists
 # and group_ids_parse checks enforce this) -- readable slugs like "tenant-a"
@@ -64,26 +64,29 @@ ALICE="67bbd96d-955d-445e-9a17-c48724d268e3"      # tenant A administrator
 BOB="6e550f85-8a38-411a-9d68-99a4bc7de046"        # tenant A editor
 CAROL="a02d52f3-88da-452f-b80d-58c44d63fada"      # tenant B administrator
 DAVE="0fbce894-82d8-4f3f-9711-3c1bcee07214"       # tenant B editor
-GROUP_EDITORS_A="editors_${TENANT_A}"             # OWNERSHIP_GROUP_ID_FORMAT={name}_{tenant}
-GROUP_EDITORS_B="editors_${TENANT_B}"
-GROUP_ADMIN_A="tenant_administrator_${TENANT_A}"
-GROUP_ADMIN_B="tenant_administrator_${TENANT_B}"
+# Neurons' shapes (PCS-10243, confirmed by Ivanti): a person is
+# `user:<tenant>.<member>`, a group is `group:<tenant>.<local id>`
+# (OWNERSHIP_GROUP_ID_FORMAT's default `{tenant}.{name}`), the tenant's
+# administrators hold the platform's `admin` relation on the tenant object,
+# and there is no group-to-tenant tuple -- the tenant is read from the id.
+U_ALICE="user:${TENANT_A}.${ALICE}"
+U_BOB="user:${TENANT_A}.${BOB}"
+U_CAROL="user:${TENANT_B}.${CAROL}"
+U_DAVE="user:${TENANT_B}.${DAVE}"
+GROUP_EDITORS_A="${TENANT_A}.editors"
+GROUP_EDITORS_B="${TENANT_B}.editors"
 
 write_tuples "[
-  {\"user\":\"user:${ALICE}\",\"relation\":\"member\",\"object\":\"tenant:${TENANT_A}\"},
-  {\"user\":\"user:${BOB}\",\"relation\":\"member\",\"object\":\"tenant:${TENANT_A}\"},
-  {\"user\":\"user:${CAROL}\",\"relation\":\"member\",\"object\":\"tenant:${TENANT_B}\"},
-  {\"user\":\"user:${DAVE}\",\"relation\":\"member\",\"object\":\"tenant:${TENANT_B}\"},
+  {\"user\":\"${U_ALICE}\",\"relation\":\"member\",\"object\":\"tenant:${TENANT_A}\"},
+  {\"user\":\"${U_BOB}\",\"relation\":\"member\",\"object\":\"tenant:${TENANT_A}\"},
+  {\"user\":\"${U_CAROL}\",\"relation\":\"member\",\"object\":\"tenant:${TENANT_B}\"},
+  {\"user\":\"${U_DAVE}\",\"relation\":\"member\",\"object\":\"tenant:${TENANT_B}\"},
 
-  {\"user\":\"user:${ALICE}\",\"relation\":\"member\",\"object\":\"group:${GROUP_ADMIN_A}\"},
-  {\"user\":\"user:${CAROL}\",\"relation\":\"member\",\"object\":\"group:${GROUP_ADMIN_B}\"},
-  {\"user\":\"tenant:${TENANT_A}#member\",\"relation\":\"tenant\",\"object\":\"group:${GROUP_ADMIN_A}\"},
-  {\"user\":\"tenant:${TENANT_B}#member\",\"relation\":\"tenant\",\"object\":\"group:${GROUP_ADMIN_B}\"},
+  {\"user\":\"${U_ALICE}\",\"relation\":\"admin\",\"object\":\"tenant:${TENANT_A}\"},
+  {\"user\":\"${U_CAROL}\",\"relation\":\"admin\",\"object\":\"tenant:${TENANT_B}\"},
 
-  {\"user\":\"user:${BOB}\",\"relation\":\"member\",\"object\":\"group:${GROUP_EDITORS_A}\"},
-  {\"user\":\"user:${DAVE}\",\"relation\":\"member\",\"object\":\"group:${GROUP_EDITORS_B}\"},
-  {\"user\":\"tenant:${TENANT_A}#member\",\"relation\":\"tenant\",\"object\":\"group:${GROUP_EDITORS_A}\"},
-  {\"user\":\"tenant:${TENANT_B}#member\",\"relation\":\"tenant\",\"object\":\"group:${GROUP_EDITORS_B}\"}
+  {\"user\":\"${U_BOB}\",\"relation\":\"member\",\"object\":\"group:${GROUP_EDITORS_A}\"},
+  {\"user\":\"${U_DAVE}\",\"relation\":\"member\",\"object\":\"group:${GROUP_EDITORS_B}\"}
 ]"
 echo "    tenant A ($TENANT_A): alice=$ALICE (admin), bob=$BOB ($GROUP_EDITORS_A)"
 echo "    tenant B ($TENANT_B): carol=$CAROL (admin), dave=$DAVE ($GROUP_EDITORS_B)"

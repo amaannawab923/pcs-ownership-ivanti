@@ -149,7 +149,12 @@ from there is exactly the from-scratch run recorded in
 
 Everything the scratch harness creates is deterministic, so this is what
 you get every time. Password is `test1234` for every user; the username is
-the Neurons member GUID.
+the Neurons member GUID. The ids are Neurons' own shapes (confirmed by
+Ivanti): a person is `user:<tenant guid>.<member guid>` in the store, the
+tenant role is `Tenant_<guid>_Role`, a group is `group:<tenant guid>.<local
+id>`, and a tenant's administrators hold the `admin` relation on the tenant
+object itself (written by the platform, never by this module). Ben is a
+chart designer, and chart designers are nested into dashboard designers.
 
 ### Tenants, users and groups
 
@@ -157,25 +162,25 @@ the Neurons member GUID.
 flowchart LR
   subgraph A["Tenant A  a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40"]
     direction TB
-    ADA["Ada tenant A  (tenant administrator)"]
+    ADA["Ada tenant A  (tenant administrator: admin on tenant:A)"]
     BEN["Ben tenant A"]
     MARCUS["Marcus Chen"]
     PRIYA["Priya Sharma"]
     ELENA["Elena Rossi"]
     DAVID["David Okafor"]
     A_OTHERS["Sofia Nguyen, James Patel, Aisha Khan, Tom Muller,\nLena Fischer, Carlos Mendez, Yuki Tanaka, Grace Adeyemi"]
-    GA["groups: tenant_administrator, dashboard_designer, chart_designer,\ndata_analyst, marketing_analytics, finance_reporting,\nengineering_metrics, support_ops, executives"]
+    GA["groups, ids A.name: dashboard_designer, chart_designer,\ndata_analyst, marketing_analytics, finance_reporting,\nengineering_metrics, support_ops, executives"]
   end
   subgraph B["Tenant B  b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92"]
     direction TB
-    CLEO["Cleo tenant B  (tenant administrator)"]
+    CLEO["Cleo tenant B  (tenant administrator: admin on tenant:B)"]
     OMAR["Omar Farouk"]
     HANNAH["Hannah Berg"]
     DIEGO["Diego Alvarez"]
     B_OTHERS["Mei Lin, Nadia Haddad, Peter Novak, Ruth Owusu"]
-    GB["groups: tenant_administrator, dashboard_designer, chart_designer,\ndata_analyst, sales_ops, finance_reporting, support_ops, executives"]
+    GB["groups, ids B.name: dashboard_designer, chart_designer,\ndata_analyst, sales_ops, finance_reporting, support_ops, executives"]
   end
-  FGA[("OpenFGA\ntenant / group / owner / viewer tuples")]
+  FGA[("OpenFGA\nuser:tenant.member, group:tenant.name, tenant#admin\nowner / editor / viewer tuples")]
   A --- FGA
   B --- FGA
 ```
@@ -254,13 +259,13 @@ unowned on purpose (it has no recoverable creator -- the "claim" scenario).
 
 | Persona | Username (GUID) | Tenant | Groups | Owns |
 |---|---|---|---|---|
-| Ada tenant A | `3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31` | A -- administrator | tenant_administrator, dashboard_designer | dashboards 7, 8, 10 and their 21 charts |
+| Ada tenant A | `3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31` | A -- administrator (`admin` on `tenant:A`) | dashboard_designer | dashboards 7, 8, 10 and their 21 charts |
 | Ben tenant A | `6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53` | A | chart_designer | nothing -- the recipient in share/transfer tests |
 | Marcus Chen | `4302756e-b4aa-4938-b599-ed593444aeaf` | A | chart_designer, data_analyst | dashboard 1 Sales Dashboard, 10 charts |
 | Priya Sharma | `9fcc709c-1a6b-4882-b8e3-1787afe31417` | A | dashboard_designer, data_analyst | dashboard 3 Featured Charts, 24 charts |
 | Elena Rossi | `58a4685c-6e11-4c4f-aad3-444839fc846a` | A | data_analyst | dashboard 6 FCC New Coder Survey, 21 charts |
 | David Okafor | `12fc0874-6358-48e8-96cb-6ada75fd8c76` | A | marketing_analytics | dashboard 9 deck.gl Demo, 6 charts |
-| Cleo tenant B | `9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76` | B -- administrator | tenant_administrator, dashboard_designer | dashboard 11 Tenant B Device Compliance, 3 charts |
+| Cleo tenant B | `9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76` | B -- administrator (`admin` on `tenant:B`) | dashboard_designer | dashboard 11 Tenant B Device Compliance, 3 charts |
 | Omar Farouk | `60f317ea-66cb-48a0-8d45-e15699486409` | B | dashboard_designer, sales_ops | dashboard 2 Misc Charts, 2 charts |
 | Hannah Berg | `e64caf0a-30fc-4f79-8f5a-e0a64dced4ad` | B | data_analyst | dashboard 4 Slack Dashboard, 5 charts |
 | Diego Alvarez | `a105bfbe-3b53-43d6-bc1c-953293a35c54` | B | sales_ops | dashboard 5 World Bank's Data, 9 charts |
@@ -500,9 +505,9 @@ COPY overlay/frontend/ /app/superset-frontend/
 # venv is already fully pinned and everything the wheel needs is in it.
 # Build the wheel with packaging/build-wheel.sh (or take the one Preset
 # ships) -- it is a plain, pure-Python wheel.
-COPY superset_ownership-0.3.0-py3-none-any.whl /tmp/
-RUN uv pip install --python /app/.venv/bin/python --no-deps /tmp/superset_ownership-0.3.0-py3-none-any.whl \
- && rm /tmp/superset_ownership-0.3.0-py3-none-any.whl
+COPY superset_ownership-0.4.0-py3-none-any.whl /tmp/
+RUN uv pip install --python /app/.venv/bin/python --no-deps /tmp/superset_ownership-0.4.0-py3-none-any.whl \
+ && rm /tmp/superset_ownership-0.4.0-py3-none-any.whl
 
 # the ONE pythonpath entry -- a single file, never a directory COPY or bind
 # mount over your image's PYTHONPATH entry (the earlier pcs-ivanti spike's

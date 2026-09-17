@@ -21,9 +21,9 @@ COMPOSE="docker compose -p pcssetup -f docker-compose.pcs-setup.yml -f scratch/d
 echo "--- ownership_object counts by visibility ---"
 $PSQL -c "SELECT visibility, count(*) FROM ownership_object GROUP BY visibility ORDER BY visibility;"
 
-echo "--- ownership_object counts by owner's tenant (derived from the owner's tenant_<guid> role) ---"
+echo "--- ownership_object counts by owner's tenant (derived from the owner's Tenant_<guid>_Role) ---"
 # NOTE: the tenant-role join is a scalar subquery, not a plain LEFT JOIN --
-# ab_user_role has one row per role a user holds (Gamma AND tenant_<guid>),
+# ab_user_role has one row per role a user holds (Gamma AND the tenant role),
 # and joining ab_role straight off ab_user_role would emit one output row
 # per role (double-counting every object). The subquery picks the (exactly
 # one, by design) tenant_% role per user first.
@@ -34,9 +34,9 @@ SELECT
 FROM ownership_object o
 LEFT JOIN ab_user u ON u.id = o.owner_user_id
 LEFT JOIN LATERAL (
-  SELECT substring(r.name from 'tenant_(.*)') AS tenant
+  SELECT lower(substring(r.name from '(?i)^tenant_([0-9a-f-]{36})(?:_role)?$')) AS tenant
   FROM ab_user_role ur JOIN ab_role r ON r.id = ur.role_id
-  WHERE ur.user_id = u.id AND r.name LIKE 'tenant\_%' ESCAPE '\\'
+  WHERE ur.user_id = u.id AND r.name ~* '^tenant_[0-9a-f-]{36}(_role)?$'
   LIMIT 1
 ) tr ON true
 GROUP BY 1
@@ -55,9 +55,9 @@ FROM dashboards d
 LEFT JOIN ownership_object o ON o.asset_type = 'dashboard' AND o.object_id = d.id
 LEFT JOIN ab_user u ON u.id = o.owner_user_id
 LEFT JOIN LATERAL (
-  SELECT substring(r.name from 'tenant_(.*)') AS tenant
+  SELECT lower(substring(r.name from '(?i)^tenant_([0-9a-f-]{36})(?:_role)?$')) AS tenant
   FROM ab_user_role ur JOIN ab_role r ON r.id = ur.role_id
-  WHERE ur.user_id = u.id AND r.name LIKE 'tenant\_%' ESCAPE '\\'
+  WHERE ur.user_id = u.id AND r.name ~* '^tenant_[0-9a-f-]{36}(_role)?$'
   LIMIT 1
 ) tr ON true
 ORDER BY d.id;

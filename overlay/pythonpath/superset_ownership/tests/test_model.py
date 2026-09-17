@@ -64,7 +64,9 @@ def test_required_is_a_subset_of_what_model_declares():
 def test_required_matches_the_spec_table():
     assert REQUIRED == {
         "user": [],
-        "tenant": ["member"],
+        # `admin` since PR #113: read on every non-owner request, so a
+        # store lacking it must fail `show-model --check`.
+        "tenant": ["member", "admin"],
         "group": ["member", "tenant"],
         "dashboard": ["owner", "editor", "viewer", "tenant"],
         "chart": ["owner", "editor", "viewer", "tenant"],

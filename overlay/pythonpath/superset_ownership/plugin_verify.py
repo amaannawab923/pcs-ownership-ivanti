@@ -489,6 +489,34 @@ class GroupHasTenantTuple(Check):
         missing = walked_ids - fast_ids
         if not missing:
             return self._result("PASS", "every walked group has a tenant tuple")
+        if not fast_ids:
+            # No group in this tenant has a tenant tuple: the relation is
+            # not in use here at all. That is Neurons' store (the tenant is
+            # read from the group id and no group->tenant tuple is
+            # written), not a half-done backfill, so it is not a FAIL. In
+            # `always` mode every listing walks and nothing reads the
+            # relation; in `auto` mode every listing first reads an empty
+            # page and warns, which the setting fixes. The CONFIGURED mode
+            # is what the deployment runs with -- `--force-walk` sets the
+            # directory's `_mode` to `always` for this process only, and
+            # must not read as a setting the deployment does not have.
+            from superset_ownership import settings
+
+            mode = settings.get(
+                "OWNERSHIP_DIRECTORY_GROUP_WALK", "auto", settings.as_str
+            )
+            if str(mode).strip().lower() == "always":
+                return self._result(
+                    "PASS",
+                    f"no tenant tuples; {len(walked_ids)} group(s) walked "
+                    "(OWNERSHIP_DIRECTORY_GROUP_WALK=always)",
+                )
+            return self._result(
+                "WARN",
+                f"no tenant tuples; {len(walked_ids)} group(s) reachable only by "
+                "the walk. Set OWNERSHIP_DIRECTORY_GROUP_WALK=always on a store "
+                "that writes none, or write the tuples",
+            )
         return self._result("FAIL", f"groups without a tenant tuple: {sorted(missing)}")
 
 
@@ -534,6 +562,30 @@ class AdministratorGroupExists(Check):
         ):
             return self._result("SKIP", "no --tenant given")
         group = ctx.tenant_administrator_group(ctx.tenant)
+        if not group.startswith("group:"):
+            # Neurons' shape (the default): the administrators are the
+            # `admin` relation on `tenant:<t>` itself, not a group; there
+            # is nothing to ask `group_exists` about, so the question is
+            # whether anyone holds the relation.
+            try:
+                admins = ctx.directory.tenant_administrators(ctx.tenant)
+            except Exception as exc:  # noqa: BLE001 - reported as the check's result
+                return self._result(
+                    "FAIL", f"tenant_administrators raised {type(exc).__name__}"
+                )
+            # `tenant_administrators` lists holders that resolve to a
+            # Superset account; a holder with no account yet (a directory-
+            # only administrator) is not counted, so an empty answer is a
+            # WARN about accounts, not proof the relation has no tuple.
+            if admins:
+                return self._result(
+                    "PASS", f"{group} has {len(admins)} administrator(s)"
+                )
+            return self._result(
+                "WARN",
+                f"{group}: no holder resolves to a Superset account "
+                "(a zero-admin tenant, or administrators not yet provisioned)",
+            )
         if ctx.directory.group_exists(group):
             return self._result("PASS", f"{group} exists")
         return self._result("WARN", f"{group} does not exist: a zero-admin tenant")
@@ -550,16 +602,28 @@ class NoMemberInTwoTenants(Check):
         others = [t for t in ctx.candidate_tenants if t != ctx.tenant]
         if not others:
             return self._result("SKIP", "only one candidate tenant known")
+        from superset_ownership.identity import (
+            compose_subject_id,
+            member_guid_of_subject_id,
+        )
+
         offenders: list[str] = []
         cursor = None
         while True:
             page = ctx.directory.search_users(ctx.tenant, "", cursor=cursor)
             for u in page["items"]:
+                # The store id carries the tenant (`<tenant>.<member>`), so
+                # the other tenant's membership is asked under ITS spelling
+                # of the same member -- asking under this tenant's spelling
+                # could never find anything.
+                member = member_guid_of_subject_id(u["guid"]) or u["guid"]
                 for other in others:
-                    if ctx.authorizer.check(
-                        f"user:{u['guid']}", "member", f"tenant:{other}"
+                    spellings = {compose_subject_id(other, member), member}
+                    if any(
+                        ctx.authorizer.check(f"user:{sp}", "member", f"tenant:{other}")
+                        for sp in sorted(spellings)
                     ):
-                        offenders.append(f"{u['guid']} in {ctx.tenant} and {other}")
+                        offenders.append(f"{member} in {ctx.tenant} and {other}")
             cursor = page.get("next_cursor")
             if not cursor:
                 break
@@ -871,13 +935,26 @@ class GuidV4(Check):
         bad: list[str] = []
         for u in ctx.jit_users[: ctx.sample_users]:
             guid = ctx.identity.member_guid(u)
-            if not guid or not _guid_v4_re().match(guid):
+            if not _store_id_is_guid_v4(guid):
                 bad.append(str(getattr(u, "id", u)))
         if bad:
             return self._result("FAIL", f"not a GUID v4: {bad}")
         return self._result(
             "PASS", f"{len(ctx.jit_users[: ctx.sample_users])} sampled, all GUID v4"
         )
+
+
+def _store_id_is_guid_v4(store_id: str | None) -> bool:
+    """Is a member id the store's shape: a GUID v4, optionally with the
+    tenant GUID (also v4) in front (`<tenant>.<member>`, Neurons' id)?"""
+    if not store_id:
+        return False
+    from superset_ownership.identity import split_subject_id
+
+    tenant, member = split_subject_id(store_id)
+    if not member or not _guid_v4_re().match(member):
+        return False
+    return tenant is None or bool(_guid_v4_re().match(tenant))
 
 
 class TenantKnownToStore(Check):
@@ -1200,7 +1277,11 @@ class ShapePairRoundtrip(Check):
                     exc_info=True,
                 )
             if ctx.tenant_administrator_group is not None:
-                ids.append(ctx.tenant_administrator_group(ctx.tenant))
+                admin_ref = ctx.tenant_administrator_group(ctx.tenant)
+                # A `tenant:<t>#admin` userset (Neurons' shape, the default)
+                # is not a group id and has no shape pair to round-trip.
+                if admin_ref.startswith("group:"):
+                    ids.append(admin_ref)
         # A synthetic pair guarantees at least one round trip is exercised
         # even with no --tenant/no directory -- this check is never SKIP.
         ids.append(ctx.group_id("verify_shape_pair", str(uuid.uuid4())))
@@ -1235,21 +1316,25 @@ def _validate_caller_result(name: str, result: Any) -> str | None:
     """The error text for a caller-side hook's answer that does not match
     its §4.5.2 shape, or None when it does.
 
-    `OWNERSHIP_MEMBER_GUID`'s documented shape (§4.5.2 row 1) is a GUID v4,
-    the `local-<id>` placeholder `DefaultIdentity`'s own fallback answers
-    for a non-GUID account (`identity._default_member_guid`), or `None` --
-    NOT "a GUID v4 or None" (H-2c): that stricter rule rejected the
-    contract's own default, on its own documented fallback shape, as a
-    verify FAIL. `OWNERSHIP_TENANT_GUID` has no such placeholder in the
-    contract and keeps the GUID-or-None rule.
+    `OWNERSHIP_MEMBER_GUID`'s documented shape (§4.5.2 row 1) is the store
+    id -- a GUID v4, optionally with the tenant GUID in front
+    (`<tenant>.<member>`, Neurons' shape) -- the `local-<id>` placeholder
+    `DefaultIdentity`'s own fallback answers for a non-GUID account
+    (`identity._default_member_guid`), or `None` -- NOT "a GUID v4 or None"
+    (H-2c): that stricter rule rejected the contract's own default, on its
+    own documented fallback shape, as a verify FAIL. `OWNERSHIP_TENANT_GUID`
+    has no such placeholder in the contract and keeps the GUID-or-None rule.
     """
     if name == "OWNERSHIP_MEMBER_GUID":
         if (
             result is not None
-            and not _guid_v4_re().match(result)
+            and not _store_id_is_guid_v4(result)
             and not _LOCAL_ID_RE.match(result)
         ):
-            return f"{name}: {result!r} is not a GUID, 'local-<id>', or None"
+            return (
+                f"{name}: {result!r} is not a GUID, '<tenant>.<guid>', "
+                "'local-<id>', or None"
+            )
     elif name == "OWNERSHIP_TENANT_GUID":
         if result is not None and not _guid_v4_re().match(result):
             return f"{name}: {result!r} is not a GUID or None"
@@ -2064,25 +2149,22 @@ def _relations_in_model(model_json: Mapping[str, Any]) -> frozenset[str]:
 
 
 def _discover_candidate_tenants() -> list[str]:
-    """Tenant GUIDs from FAB roles named `tenant_<guid>` (backfill.py's
-    candidate-role scan, reused read-only)."""
+    """Tenant GUIDs from the FAB tenant roles (`Tenant_<guid>_Role`, Neurons'
+    shape, or the earlier `tenant_<guid>`; backfill.py's candidate-role
+    scan, reused read-only)."""
     from superset import security_manager
 
-    from superset_ownership.identity import is_structural_tenant_role
+    from superset_ownership.identity import tenant_of_role_name
 
     tenants = []
     for role in security_manager.get_all_roles():
-        # A structural tenant role IS the thing we're collecting candidates
-        # from (`tenant_<guid>`, and -- structurally, though not expected as
-        # an actual FAB role name -- the administrator group's id); the
-        # inverted condition this replaces collected every role that was
-        # NOT one, which is how `tenant_isolation` ended up comparing
-        # `Admin` against `Public` instead of two real tenants (PR90 review
-        # B-4).
-        if is_structural_tenant_role(role.name):
-            guid = role.name.removeprefix("tenant_")
-            if guid:
-                tenants.append(guid)
+        # Only a tenant role names a candidate; the inverted condition this
+        # replaces collected every role that was NOT one, which is how
+        # `tenant_isolation` ended up comparing `Admin` against `Public`
+        # instead of two real tenants (PR90 review B-4).
+        guid = tenant_of_role_name(role.name)
+        if guid and guid not in tenants:
+            tenants.append(guid)
     return tenants
 
 
@@ -2098,13 +2180,15 @@ def _discover_jit_users(tenant: str | None, sample_users: int) -> Sequence[Any]:
         return []
     from superset import security_manager
 
-    role_name = f"tenant_{tenant}" if tenant else None
+    from superset_ownership.identity import tenant_of_role_name
+
+    wanted = tenant.lower() if tenant else None
     users = []
     for user in security_manager.get_all_users():
-        role_names = {r.name for r in user.roles}
-        if role_name is not None and role_name not in role_names:
-            continue
-        if role_name is None and not any(r.startswith("tenant_") for r in role_names):
+        # A JIT user is one holding a tenant role (`Tenant_<guid>_Role` or
+        # `tenant_<guid>`); with a --tenant, the role of THAT tenant.
+        held = {tenant_of_role_name(r.name) for r in user.roles} - {None}
+        if not held or (wanted is not None and wanted not in held):
             continue
         users.append(user)
         if len(users) >= sample_users:
@@ -2277,10 +2361,13 @@ class _Fixtures:
     """Scratch-store fixture writer for `plugin verify`'s vocabulary/
     directory sections and `plugin seed-scratch`.
 
-    Shapes reused verbatim from `qa/seed_fga.sh` (the same tenants, users and
-    role groups every manual test round is already seeded with) plus one
-    `group X tenant Y` tuple per group -- the additive relation this PR's
-    model artefact adds (spec §9).
+    Neurons' shapes (PCS-10243, confirmed by Ivanti), the same ones
+    `qa/seed_fga.sh` writes: a member is `user:<tenant>.<member>`, a group
+    is `group:<tenant>.<local id>` (through `identity.group_object`, so a
+    configured OWNERSHIP_GROUP_ID_FORMAT is honoured), the tenant's
+    administrators hold `admin` on `tenant:<t>`, plus one `group X tenant Y`
+    tuple per group -- the additive relation this package's model adds to
+    theirs (spec §9).
     """
 
     BROKEN_VARIANTS: tuple[str, ...] = (
@@ -2295,12 +2382,19 @@ class _Fixtures:
     BEN = "6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53"
     CLEO = "9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76"
 
-    def group_id(self, name: str, tenant: str) -> str:
-        # Mirrors identity.group_object's default "{name}_{tenant}" shape;
-        # the real helper is used instead of this one whenever it is
-        # available (see seed_scratch), so a configured
-        # OWNERSHIP_GROUP_ID_FORMAT of "{tenant}_{name}" is still honoured.
-        return f"group:{name}_{tenant}"
+    @staticmethod
+    def group_object(name: str, tenant: str) -> str:
+        """`group:<id>` under the configured format -- the OBJECT form, as
+        `identity.group_object` names it (not a bare id)."""
+        from superset_ownership.identity import group_object
+
+        return group_object(name, tenant)
+
+    @staticmethod
+    def subject(tenant: str, member: str) -> str:
+        from superset_ownership.identity import compose_subject_id
+
+        return f"user:{compose_subject_id(tenant, member)}"
 
     def tuples(
         self,
@@ -2316,31 +2410,32 @@ class _Fixtures:
             )
         a = tenant_a or self.TENANT_A
         b = tenant_b or self.TENANT_B
-        dd_a = self.group_id("dashboard_designer", a)
-        cd_a = self.group_id("chart_designer", a)
-        ta_a = self.group_id("tenant_administrator", a)
-        dd_b = self.group_id("dashboard_designer", b)
+        dd_a = self.group_object("dashboard_designer", a)
+        cd_a = self.group_object("chart_designer", a)
+        dd_b = self.group_object("dashboard_designer", b)
+        ada = self.subject(a, self.ADA)
+        ben = self.subject(a, self.BEN)
+        cleo = self.subject(b, self.CLEO)
 
         rows = [
-            {"user": f"user:{self.ADA}", "relation": "member", "object": f"tenant:{a}"},
-            {"user": f"user:{self.BEN}", "relation": "member", "object": f"tenant:{a}"},
-            {
-                "user": f"user:{self.CLEO}",
-                "relation": "member",
-                "object": f"tenant:{b}",
-            },
-            {"user": f"user:{self.ADA}", "relation": "member", "object": dd_a},
-            {"user": f"user:{self.BEN}", "relation": "member", "object": cd_a},
-            {"user": f"user:{self.ADA}", "relation": "member", "object": ta_a},
-            {"user": f"user:{self.CLEO}", "relation": "member", "object": dd_b},
-            {"user": f"{ta_a}#member", "relation": "member", "object": dd_a},
+            {"user": ada, "relation": "member", "object": f"tenant:{a}"},
+            {"user": ben, "relation": "member", "object": f"tenant:{a}"},
+            {"user": cleo, "relation": "member", "object": f"tenant:{b}"},
+            # The tenant's administrators: the platform's `admin` relation
+            # on the tenant itself, never a group of ours.
+            {"user": ada, "relation": "admin", "object": f"tenant:{a}"},
+            {"user": cleo, "relation": "admin", "object": f"tenant:{b}"},
+            {"user": ada, "relation": "member", "object": dd_a},
+            {"user": ben, "relation": "member", "object": cd_a},
+            {"user": cleo, "relation": "member", "object": dd_b},
+            # A nested group: chart designers are dashboard designers too.
+            {"user": f"{cd_a}#member", "relation": "member", "object": dd_a},
             # group.tenant is `define tenant: [tenant#member]` (model/ownership.fga):
             # the SUBJECT is the tenant's member set, the OBJECT is the group --
             # the inverse of how earlier drafts of this fixture (and the README/
             # debate-doc rows they were copied from) read it. See PR90 review B-2.
             {"user": f"tenant:{a}#member", "relation": "tenant", "object": dd_a},
             {"user": f"tenant:{a}#member", "relation": "tenant", "object": cd_a},
-            {"user": f"tenant:{a}#member", "relation": "tenant", "object": ta_a},
             {"user": f"tenant:{b}#member", "relation": "tenant", "object": dd_b},
         ]
 
@@ -2353,19 +2448,19 @@ class _Fixtures:
         elif broken == "cross_tenant_member":
             rows.append(
                 {
-                    "user": f"user:{self.ADA}",
+                    "user": self.subject(b, self.ADA),
                     "relation": "member",
                     "object": f"tenant:{b}",
                 }
             )
         elif broken == "wrong_format_id":
-            # A group id in the OTHER format than the default -- fails
-            # split_group_id under a "{name}_{tenant}"-configured instance.
+            # A group id in the OTHER format than the configured one --
+            # fails split_group_id under the default "{tenant}.{name}".
             rows.append(
                 {
-                    "user": f"user:{self.BEN}",
+                    "user": ben,
                     "relation": "member",
-                    "object": f"group:{a}_stray",
+                    "object": f"group:stray_{a}",
                 }
             )
         return rows

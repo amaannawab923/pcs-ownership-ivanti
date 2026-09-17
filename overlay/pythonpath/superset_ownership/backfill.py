@@ -150,15 +150,11 @@ def _tenant_datasources() -> dict[int, set[str]]:
     datasource_access and separate tenants purely by row filter.
     """
     from superset import db
-    from superset_ownership.identity import TENANT_ROLE_PREFIX, _first_guid
+    from superset_ownership.identity import tenant_of_role_name
 
     def tenant_of(role_name: str) -> str | None:
-        name = (role_name or "").lower()
-        if not name.startswith(TENANT_ROLE_PREFIX):
-            return None
-        guid = _first_guid(name)
-        # Exactly `tenant_<guid>` -- never `tenant_administrator_<guid>`.
-        return guid if guid and name == f"{TENANT_ROLE_PREFIX}{guid}" else None
+        # Exactly the membership role -- never `tenant_administrator_<guid>`.
+        return tenant_of_role_name(role_name)
 
     out: dict[int, set[str]] = {}
 
@@ -316,7 +312,7 @@ def _tenant_admins() -> list[int]:
     """
     from superset import security_manager as sm
 
-    from superset_ownership.identity import TENANT_ROLE_PREFIX, _first_guid
+    from superset_ownership.identity import tenant_of_role_name
 
     # OpenFGA has no "list every tenant" call -- /read needs a concrete
     # `tenant:<guid>`. So the FAB roles supply CANDIDATE guids (the only
@@ -327,12 +323,9 @@ def _tenant_admins() -> list[int]:
     # multi-tenant and suppress the assignment below.
     candidates = set()
     for role in sm.get_all_roles():
-        name = (getattr(role, "name", "") or "").lower()
-        if not name.startswith(TENANT_ROLE_PREFIX):
-            continue
-        guid = _first_guid(name)
-        # Exactly `tenant_<guid>` -- never `tenant_administrator_<guid>`.
-        if guid and name == f"{TENANT_ROLE_PREFIX}{guid}":
+        # Exactly the membership role -- never `tenant_administrator_<guid>`.
+        guid = tenant_of_role_name(getattr(role, "name", "") or "")
+        if guid:
             candidates.add(guid)
 
     directory = get_directory()

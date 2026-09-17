@@ -100,6 +100,21 @@ def mirrored(the_row, store_tenant):
     return replace(the_row, tenant_guid=store_tenant)
 
 
+@pytest.fixture(autouse=True)
+def _pre_configuration_group_ids(monkeypatch):
+    """This file's fixtures spell group ids in the pre-configuration shape
+    (`<name>_<tenant>`); the format-independent logic under test is the
+    same under Neurons' default (`<tenant>.<name>`), which
+    `test_group_id.py` pins on its own. Tests about the format itself set
+    it explicitly."""
+    from superset_ownership.identity import (
+        GROUP_ID_FORMAT_SETTING,
+        GROUP_ID_FORMAT_SUFFIX,
+    )
+
+    monkeypatch.setenv(GROUP_ID_FORMAT_SETTING, GROUP_ID_FORMAT_SUFFIX)
+
+
 @pytest.fixture
 def superset_stub(monkeypatch):
     """A `superset` module with the two names api.py imports from it."""
@@ -409,22 +424,22 @@ def test_is_structural_tenant_role(name, structural):
 
 
 def test_the_structural_administrator_group_follows_the_group_id_format(monkeypatch):
-    # The membership role is a FAB role and is always `tenant_<guid>`; the
-    # administrator group is a GROUP and is spelled in whichever format
-    # OWNERSHIP_GROUP_ID_FORMAT configures. One definition
-    # (`identity.tenant_administrator_group`) builds it, so the structural
-    # test follows that definition rather than a second spelling of it.
+    # The administrators are the `admin` relation on the tenant object in
+    # every format (Neurons' shape), so `tenant_administrator_group` is
+    # format-independent. The STRUCTURAL role names are: the membership
+    # role in either shape, an administrator group id in the configured
+    # format, and the local backend's fixed `tenant_administrator_<guid>`.
     monkeypatch.setenv(
         identity.GROUP_ID_FORMAT_SETTING, identity.GROUP_ID_FORMAT_PREFIX
     )
-    admin_group = identity.tenant_administrator_group(TENANT_A)
-    assert admin_group == f"group:{TENANT_A}_tenant_administrator"
-    assert identity.is_structural_tenant_role(admin_group.split(":", 1)[1]) is True
-    assert identity.is_structural_tenant_role(f"tenant_{TENANT_A}") is True
-    # The suffix spelling is an ordinary role under the prefix format, and a
-    # group named after the administrators without the tenant is nothing.
+    assert identity.tenant_administrator_group(TENANT_A) == f"tenant:{TENANT_A}#admin"
     assert (
-        identity.is_structural_tenant_role(f"tenant_administrator_{TENANT_A}") is False
+        identity.is_structural_tenant_role(f"{TENANT_A}_tenant_administrator") is True
+    )
+    assert identity.is_structural_tenant_role(f"tenant_{TENANT_A}") is True
+    assert identity.is_structural_tenant_role(f"Tenant_{TENANT_A}_Role") is True
+    assert (
+        identity.is_structural_tenant_role(f"tenant_administrator_{TENANT_A}") is True
     )
     assert identity.is_structural_tenant_role("tenant_administrator") is False
     # And the config guard follows: the prefix-format administrator group

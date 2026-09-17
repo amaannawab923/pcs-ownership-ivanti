@@ -116,8 +116,10 @@ def _dataset_accessible_tenants(sm, table_perm_cache: dict, ds) -> set[str]:
     if key in table_perm_cache:
         return table_perm_cache[key]
     accessible = set()
+    from superset_ownership.identity import tenant_role_name
+
     for tenant in (TENANT_A, TENANT_B):
-        role = sm.find_role(f"tenant_{tenant}")
+        role = sm.find_role(tenant_role_name(tenant))
         if role is None:
             continue
         pvm = sm.find_permission_view_menu("datasource_access", ds.perm)

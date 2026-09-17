@@ -100,17 +100,20 @@ what production looks like?" below.
 |---|---|
 | Store id | `01M2F234EV0AE8KZN18Z1SZ628` (`pcs-scratch`, from the from-scratch run on `pcs-ownership:pip`; older store ids in these notes refer to the previous, destroyed instance -- `select store, count(*) from fga_tuple group by 1` lists what exists now) |
 | Tenants | A = `a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40`, B = `b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92` |
-| Tuple counts at time of writing | chart owner 427 · chart tenant 427 · chart viewer 4 · dashboard owner 42 · dashboard tenant 42 · dashboard viewer 1 · group member 165 · group tenant 89 · tenant member 110 |
+| Tuple counts at time of writing | chart owner 427 · chart tenant 427 · chart viewer 4 · dashboard owner 42 · dashboard tenant 42 · dashboard viewer 1 · group member 165 · tenant member 110 · tenant admin 2 (no group->tenant tuples: Neurons carries the tenant in the group id) |
 
 ## SQL Lab tabs (connection 2)
 
 ### Neurons groups — one row per group, members named
 
 ```sql
+-- Neurons' shapes: a group id is `<tenant guid>.<local id>`, a person is
+-- `user:<tenant guid>.<member guid>` -- the tenant is the first 36 chars
+-- of each, the local id / member guid what follows the dot.
 WITH members AS (
-  SELECT split_part(t.object_id, '_' || right(t.object_id, 36), 1) AS group_name,
-         right(t.object_id, 36)                                    AS tenant_guid,
-         replace(t.subject, 'user:', '')                            AS member_guid
+  SELECT substr(t.object_id, 38)                                    AS group_name,
+         left(t.object_id, 36)                                      AS tenant_guid,
+         substr(t.subject, 43)                                      AS member_guid
   FROM fga_tuple t
   WHERE t.store = '01M2F234EV0AE8KZN18Z1SZ628'
     AND t.object_type = 'group' AND t.relation = 'member' AND t.user_type = 'user'
@@ -131,7 +134,7 @@ Result: 17 rows (9 groups in Tenant A, 8 in Tenant B).
 ### Neurons users — one row per user with user id and tenant id
 
 ```sql
-SELECT replace(t.subject, 'user:', '')                                   AS user_id,
+SELECT substr(t.subject, 43)                                             AS user_id,
        t.object_id                                                       AS tenant_id,
        CASE t.object_id
          WHEN 'a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40' THEN 'Tenant A'
@@ -142,7 +145,7 @@ SELECT replace(t.subject, 'user:', '')                                   AS user
        'tenant:' || t.object_id                                          AS fga_object,
        t.inserted_at                                                     AS written_at
 FROM fga_tuple t
-LEFT JOIN ab_user u ON u.username = replace(t.subject, 'user:', '')
+LEFT JOIN ab_user u ON u.username = substr(t.subject, 43)
 WHERE t.store = '01M2F234EV0AE8KZN18Z1SZ628'
   AND t.object_type = 'tenant' AND t.relation = 'member' AND t.user_type = 'user'
 ORDER BY tenant_name, display_name
@@ -154,15 +157,19 @@ Result: 22 rows (14 in Tenant A, 8 in Tenant B).
 ```sql
 WITH t AS (SELECT * FROM fga_tuple WHERE store = '01M2F234EV0AE8KZN18Z1SZ628'),
 tenant_of AS (
-  SELECT replace(subject,'user:','') AS member_guid, object_id AS tenant_guid
+  SELECT substr(subject, 43) AS member_guid, object_id AS tenant_guid
   FROM t WHERE object_type='tenant' AND relation='member' AND user_type='user'),
+-- the tenant's administrators: the platform's `admin` relation on the
+-- tenant object (a user directly; a group named as admin is not expanded here)
+admins AS (
+  SELECT substr(subject, 43) AS member_guid
+  FROM t WHERE object_type='tenant' AND relation='admin' AND user_type='user'),
 groups_of AS (
-  SELECT replace(subject,'user:','') AS member_guid,
-         string_agg(split_part(object_id, '_' || right(object_id,36), 1), ', ' ORDER BY object_id) AS groups,
-         bool_or(object_id LIKE 'tenant_administrator_%') AS is_tenant_admin
+  SELECT substr(subject, 43) AS member_guid,
+         string_agg(substr(object_id, 38), ', ' ORDER BY object_id) AS groups
   FROM t WHERE object_type='group' AND relation='member' AND user_type='user' GROUP BY 1),
 owns AS (
-  SELECT replace(subject,'user:','') AS member_guid,
+  SELECT substr(subject, 43) AS member_guid,
          count(*) FILTER (WHERE object_type='dashboard') AS dashboards_owned,
          count(*) FILTER (WHERE object_type='chart')     AS charts_owned
   FROM t WHERE relation='owner' AND user_type='user' GROUP BY 1)
@@ -172,12 +179,13 @@ SELECT CASE tenant_of.tenant_guid
          ELSE coalesce(tenant_of.tenant_guid,'(no tenant tuple)') END AS tenant,
        coalesce(u.first_name||' '||u.last_name, tenant_of.member_guid) AS "user",
        tenant_of.member_guid AS member_guid,
-       CASE WHEN coalesce(g.is_tenant_admin,false) THEN 'yes' ELSE '' END AS tenant_admin,
+       CASE WHEN a.member_guid IS NOT NULL THEN 'yes' ELSE '' END AS tenant_admin,
        coalesce(g.groups,'') AS groups,
        coalesce(o.dashboards_owned,0) AS dashboards_owned,
        coalesce(o.charts_owned,0) AS charts_owned,
        CASE WHEN u.active THEN 'active' WHEN u.id IS NULL THEN 'not in Superset' ELSE 'deactivated' END AS superset_status
 FROM tenant_of
+LEFT JOIN admins a    ON a.member_guid = tenant_of.member_guid
 LEFT JOIN groups_of g ON g.member_guid = tenant_of.member_guid
 LEFT JOIN owns o      ON o.member_guid = tenant_of.member_guid
 LEFT JOIN ab_user u   ON u.username    = tenant_of.member_guid

@@ -952,6 +952,181 @@ def test_backfill_stamps_the_owners_tenant_not_the_creators(harness):
     # a native owner is admitted by stock before the tenant rule is asked.)
 
 
+def test_neurons_shapes_end_to_end(harness):
+    """Ivanti's id shapes, through the real routes and the store fake:
+    a person provisioned with `Tenant_<guid>_Role` resolves to the tenant;
+    every tuple this module writes for them is `user:<tenant>.<member>`;
+    a share to a `group:<tenant>.<local-id>` group reaches a nested
+    member; and the tenant's administrator is the `admin` relation on the
+    tenant object -- a user directly, or a group named as admin."""
+    tenant = guid(0x1A)
+    role = f"Tenant_{tenant}_Role"
+    nia = harness.add_person(guid(0x110), "Nia", "Gamma", "sales_readers", role)
+    noa = harness.add_person(guid(0x111), "Noa", "Gamma", "sales_readers", role)
+    nat = harness.add_person(guid(0x112), "Nat", "Gamma", "sales_readers", role)
+    tam = harness.add_person(guid(0x113), "TamN", "Gamma", "sales_readers", role)
+    assert nia.ref == f"user:{tenant}.{guid(0x110)}", "the store spelling"
+    with harness.ctx():
+        from superset_ownership.identity import member_ref, resolve_tenant_guid
+
+        assert resolve_tenant_guid(harness._user(nia)) == tenant
+        assert member_ref(nia.id) == nia.ref
+
+    chart = harness.create_chart(nia, "neurons-shaped")
+    harness.set_visibility(nia, chart, "shared")
+    harness.drain()
+    assert (nia.ref, "owner", chart.obj) in harness.authorizer.tuples
+    assert (f"tenant:{tenant}#member", "tenant", chart.obj) in harness.authorizer.tuples
+
+    # A direct share, written and checked in the dotted spelling; the
+    # picker's bare member GUID names the same person.
+    harness.share(nia, chart, f"user:{guid(0x111)}")
+    assert (noa.ref, "viewer", chart.obj) in harness.authorizer.tuples
+    assert harness.decide(noa, chart).verdict == ALLOW
+
+    # A Neurons-shaped group, nested one level: parent <- child <- Nat.
+    parent, child = f"{tenant}.designers", f"{tenant}.designers.eu"
+    harness.authorizer.groups[child] = {nat.ref}
+    harness.authorizer.groups[parent] = {f"group:{child}#member"}
+    harness.authorizer.tuples.add(
+        (f"group:{child}#member", "member", f"group:{parent}")
+    )
+    harness.share(nia, chart, f"group:{parent}#member")
+    assert harness.decide(nat, chart).verdict == ALLOW
+
+    # The administrator: the admin relation on the tenant object, no group.
+    assert harness.get(tam, f"/api/v1/ownership/chart/{chart.id}").status_code == 404
+    harness.authorizer.make_tenant_administrator(tam.ref, tenant)
+    r = harness.get(tam, f"/api/v1/ownership/chart/{chart.id}")
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["manage_reason"] == "tenant_admin"
+    with harness.ctx():
+        from superset_ownership.plugins import get_directory
+
+        admins = get_directory().tenant_administrators(tenant)
+    assert [a["guid"] for a in admins] == [f"{tenant}.{guid(0x113)}"]
+
+
+def test_a_pre_upgrade_bare_guid_share_is_listed_reported_and_removable(harness):
+    """PR #113 review B1: a share written before the store id carried the
+    tenant sits in the mirror as `user:<member>` with a matching tuple.
+    It grants nothing under the new spelling (the check asks
+    `user:<tenant>.<member>`), `check` lists it under `user_id_mismatch`,
+    and `DELETE .../shares/user:<member>` revokes under the ROW's own
+    spelling -- row and tuple both go, 200, not a 202 against a subject
+    that has neither. A re-share then lists the person once."""
+    tenant = guid(0x1B)
+    role = f"Tenant_{tenant}_Role"
+    ola = harness.add_person(guid(0x120), "Ola", "Gamma", "sales_readers", role)
+    oli = harness.add_person(guid(0x121), "Oli", "Gamma", "sales_readers", role)
+    chart = harness.create_chart(ola, "legacy-bare-share")
+    harness.set_visibility(ola, chart, "shared")
+    harness.drain()
+
+    legacy = f"user:{guid(0x121)}"
+    with harness.ctx():
+        from superset import db
+
+        from superset_ownership import service
+
+        service.add_share_row("chart", chart.id, legacy, "viewer")
+        db.session.commit()
+    harness.authorizer.tuples.add((legacy, "viewer", chart.obj))
+
+    assert harness.decide(oli, chart).verdict != ALLOW, (
+        "the old spelling grants nothing"
+    )
+    r = harness.get(ola, f"/api/v1/ownership/chart/{chart.id}")
+    assert [sh["subject"] for sh in r.get_json()["shares"]] == [legacy]
+    with harness.ctx():
+        from superset_ownership.lifecycle import check_consistency
+
+        report = check_consistency()
+    assert report["user_id_mismatch"] == [legacy]
+    assert report["ok"] is False
+
+    r = harness.revoke(ola, chart, legacy)
+    assert r.status_code == 200
+    assert "queued" not in r.get_json(), r.get_json()
+    assert (legacy, "viewer", chart.obj) not in harness.authorizer.tuples
+    r = harness.get(ola, f"/api/v1/ownership/chart/{chart.id}")
+    assert r.get_json()["shares"] == []
+    with harness.ctx():
+        assert check_consistency()["user_id_mismatch"] == []
+
+    harness.share(ola, chart, legacy)
+    assert harness.decide(oli, chart).verdict == ALLOW
+    r = harness.get(ola, f"/api/v1/ownership/chart/{chart.id}")
+    assert [sh["subject"] for sh in r.get_json()["shares"]] == [oli.ref]
+
+
+def test_unshare_names_the_row_the_caller_spelt_when_both_spellings_exist(harness):
+    """PR #113 review round 2: with a legacy `user:<member>` row AND the
+    canonical `user:<tenant>.<member>` row for one person (re-shared before
+    the old row was cleared), `DELETE .../shares/user:<member>` removes the
+    legacy row -- the raw subject's own row wins before normalisation --
+    and leaves the live one; the person keeps access. A second delete by
+    the canonical spelling clears that one."""
+    tenant = guid(0x1E)
+    role = f"Tenant_{tenant}_Role"
+    ria = harness.add_person(guid(0x140), "Ria", "Gamma", "sales_readers", role)
+    rio = harness.add_person(guid(0x141), "Rio", "Gamma", "sales_readers", role)
+    chart = harness.create_chart(ria, "both-spellings")
+    harness.set_visibility(ria, chart, "shared")
+    harness.share(ria, chart, rio.ref)
+    legacy = f"user:{guid(0x141)}"
+    with harness.ctx():
+        from superset import db
+
+        from superset_ownership import service
+
+        service.add_share_row("chart", chart.id, legacy, "viewer")
+        db.session.commit()
+    harness.authorizer.tuples.add((legacy, "viewer", chart.obj))
+
+    r = harness.revoke(ria, chart, legacy)
+    assert r.get_json()["subject"] == legacy
+    assert (legacy, "viewer", chart.obj) not in harness.authorizer.tuples
+    assert (rio.ref, "viewer", chart.obj) in harness.authorizer.tuples
+    assert harness.decide(rio, chart).verdict == ALLOW
+    r = harness.get(ria, f"/api/v1/ownership/chart/{chart.id}")
+    assert [sh["subject"] for sh in r.get_json()["shares"]] == [rio.ref]
+
+    harness.revoke(ria, chart, rio.ref)
+    assert harness.decide(rio, chart).verdict != ALLOW
+
+
+def test_another_tenants_spelling_of_a_member_names_nobody(harness):
+    """PR #113 review: `user:<B>.<m>` for a member of A resolved by the
+    member half and came back re-spelt as `user:<A>.<m>` -- a share request
+    naming tenant B's spelling was answered for tenant A's, and the client
+    could not tell. The default path now applies the same forward check as
+    the hooked one: the tenant halves must agree, so the subject is a 400."""
+    tenant = guid(0x1C)
+    other = guid(0x1D)
+    role = f"Tenant_{tenant}_Role"
+    pia = harness.add_person(guid(0x130), "Pia", "Gamma", "sales_readers", role)
+    pim = harness.add_person(guid(0x131), "Pim", "Gamma", "sales_readers", role)
+    with harness.ctx():
+        from superset_ownership.identity import normalize_subject
+
+        assert normalize_subject(f"user:{guid(0x131)}") == pim.ref
+        assert normalize_subject(pim.ref) == pim.ref
+        assert normalize_subject(f"user:{other}.{guid(0x131)}") is None
+    chart = harness.create_chart(pia, "foreign-spelling")
+    harness.set_visibility(pia, chart, "shared")
+    r = harness.post(
+        pia,
+        f"/api/v1/ownership/chart/{chart.id}/shares",
+        {"subject": f"user:{other}.{guid(0x131)}", "role": "viewer"},
+    )
+    assert r.status_code == 400, (r.status_code, r.get_json())
+    harness.drain()
+    assert not any(
+        t[2] == chart.obj and t[1] == "viewer" for t in harness.authorizer.tuples
+    )
+
+
 def test_list_filter_cost_does_not_grow_with_the_tenants_public_objects(harness):
     """The public objects of the caller's tenant are decided in SQL, as
     stock decides them: the statements the list filter issues are the same
@@ -2521,7 +2696,7 @@ def test_tenant_admin_claiming_a_rowless_draft_dashboard_stays_visible_to_them(h
     role = f"tenant_{tenant}"
     ana = harness.add_person(guid(0x54), "M3Ana", "Gamma", "sales_readers", role)
     tam = harness.add_person(guid(0x55), "M3Tam", "Gamma", "sales_readers", role)
-    harness.authorizer.groups[f"tenant_administrator_{tenant}"] = {tam.ref}
+    harness.authorizer.make_tenant_administrator(tam.ref, tenant)
 
     ref = harness.create_dashboard(ana, title="rowless-draft")
     r = harness.put(ana, f"/api/v1/dashboard/{ref.id}", {"published": False})

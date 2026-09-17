@@ -157,7 +157,10 @@ def check() -> None:
     a format switch on an instance with existing group shares looks like;
     and, without failing, `group_untenanted`: shares to groups outside the
     tenant convention (no tenant in the id), which the store honours
-    regardless of the format.
+    regardless of the format. `user_id_mismatch` lists user share rows spelt
+    without the tenant while the account sits in one (rows written before
+    the store id carried the tenant); those grant nothing and fail the
+    check -- unshare each and share again.
 
     Also reports the switches (`enabled_backend`, `enabled_ui`,
     `enabled_ui_runtime`, `ui_flag_hooked`, as `status` does) and fails when

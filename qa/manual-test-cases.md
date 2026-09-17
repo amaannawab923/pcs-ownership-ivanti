@@ -21,20 +21,20 @@ Target: Preset PCS (Apache Superset 6.x) with the ownership/sharing module (`sup
 
 | Persona | GUID (= Superset username) | Tenant | Role |
 |---|---|---|---|
-| Ada | `3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31` | A | **Tenant A administrator** (member of `tenant_administrator_<A>`, nested into `dashboard_designer_<A>`); owns dashboards 7, 8, 10 and chart 78 |
-| Ben | `6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53` | A | Plain member of tenant A, no groups |
-| Marcus Chen | `4302756e-b4aa-4938-b599-ed593444aeaf` | A | Member — groups `chart_designer_<A>`, `data_analyst_<A>`; owns dashboard 1 ("Sales Dashboard") |
-| Priya Sharma | `9fcc709c-1a6b-4882-b8e3-1787afe31417` | A | Member — groups `dashboard_designer_<A>`, `data_analyst_<A>` |
-| Elena Rossi | `58a4685c-6e11-4c4f-aad3-444839fc846a` | A | Member — group `data_analyst_<A>`; owns dashboard 6 |
-| Grace Adeyemi | `4ddb1932-8b1c-49be-93b1-a9920129874b` | A | Member — groups `executives_<A>`, `dashboard_designer_<A>` |
-| David Okafor | `12fc0874-6358-48e8-96cb-6ada75fd8c76` | A | Member — group `marketing_analytics_<A>`; owns dashboard 9 |
-| Cleo | `9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76` | B | **Tenant B administrator** (member of `tenant_administrator_<B>`); owns dashboard 11 |
-| Omar Farouk | `60f317ea-66cb-48a0-8d45-e15699486409` | B | Member — groups `dashboard_designer_<B>`, `sales_ops_<B>` |
-| Hannah Berg | `e64caf0a-30fc-4f79-8f5a-e0a64dced4ad` | B | Member — group `data_analyst_<B>`; owns dashboard 4 |
-| Mei Lin | `21387ae6-c116-4a2a-bd19-c46828e2e40d` | B | Member — groups `data_analyst_<B>`, `chart_designer_<B>` |
-| Diego Alvarez | `a105bfbe-3b53-43d6-bc1c-953293a35c54` | B | Member — group `sales_ops_<B>`; owns dashboard 5 |
+| Ada | `3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31` | A | **Tenant A administrator** (`user:<A>.<ada> admin tenant:<A>`), member of `group:<A>.dashboard_designer`; owns dashboards 7, 8, 10 and chart 78 |
+| Ben | `6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53` | A | Member — group `<A>.chart_designer` (nested into `<A>.dashboard_designer`) |
+| Marcus Chen | `4302756e-b4aa-4938-b599-ed593444aeaf` | A | Member — groups `<A>.chart_designer`, `<A>.data_analyst`; owns dashboard 1 ("Sales Dashboard") |
+| Priya Sharma | `9fcc709c-1a6b-4882-b8e3-1787afe31417` | A | Member — groups `<A>.dashboard_designer`, `<A>.data_analyst` |
+| Elena Rossi | `58a4685c-6e11-4c4f-aad3-444839fc846a` | A | Member — group `<A>.data_analyst`; owns dashboard 6 |
+| Grace Adeyemi | `4ddb1932-8b1c-49be-93b1-a9920129874b` | A | Member — groups `<A>.executives`, `<A>.dashboard_designer` |
+| David Okafor | `12fc0874-6358-48e8-96cb-6ada75fd8c76` | A | Member — group `<A>.marketing_analytics`; owns dashboard 9 |
+| Cleo | `9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76` | B | **Tenant B administrator** (`user:<B>.<cleo> admin tenant:<B>`), member of `group:<B>.dashboard_designer`; owns dashboard 11 |
+| Omar Farouk | `60f317ea-66cb-48a0-8d45-e15699486409` | B | Member — groups `<B>.dashboard_designer`, `<B>.sales_ops` |
+| Hannah Berg | `e64caf0a-30fc-4f79-8f5a-e0a64dced4ad` | B | Member — group `<B>.data_analyst`; owns dashboard 4 |
+| Mei Lin | `21387ae6-c116-4a2a-bd19-c46828e2e40d` | B | Member — groups `<B>.data_analyst`, `<B>.chart_designer` |
+| Diego Alvarez | `a105bfbe-3b53-43d6-bc1c-953293a35c54` | B | Member — group `<B>.sales_ops`; owns dashboard 5 |
 
-Group ids follow `OWNERSHIP_GROUP_ID_FORMAT`, default `{name}_{tenant}` — e.g. `group:dashboard_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40`. The tenant-membership group is `group:tenant_<guid>`; the administrator group is `group:tenant_administrator_<guid>` (`identity.py:149`, `TENANT_ADMINISTRATOR_GROUP`).
+The id shapes are Neurons' (PCS-10243, confirmed by Ivanti). A person is `user:<tenant guid>.<member guid>` in the store (the API and the picker accept and show the bare member GUID; the module canonicalises). The tenant role is `Tenant_<guid>_Role`. Group ids follow `OWNERSHIP_GROUP_ID_FORMAT`, default `{tenant}.{name}` — e.g. `group:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40.dashboard_designer`; there is no group-to-tenant tuple (the tenant is read from the id; `OWNERSHIP_DIRECTORY_GROUP_WALK=always`). A tenant's administrators are the `admin` relation on `tenant:<guid>` (`identity.tenant_administrator_group` → `tenant:<guid>#admin`), written by the platform, never by this module.
 
 ### Seeded objects used below
 
@@ -73,7 +73,7 @@ Result: PASS — all six logins (Ada, Ben, Marcus, Cleo, Omar, admin) succeeded 
 Preconditions: shell access to `pcssetup-superset-1`.
 Steps: `docker exec pcssetup-superset-1 superset ownership status`.
 Expected: JSON with `enabled_backend: true`, `enabled_ui: true`, `enabled_ui_runtime: true`, `flags_agree: true`, `backend_loaded: true`, `group_id_format`, `objects` (total row count), `by_visibility` (counts per visibility), `shares` (total share rows) — per `cli.py:90-146`. Note this command reports instance state, not "who am I" (there is no per-caller identity in the CLI output) — record this if a tester expected a "current user" field.
-Result: PASS — all fields present as expected: enabled_backend/enabled_ui/enabled_ui_runtime/flags_agree/backend_loaded all true, group_id_format "{name}_{tenant}", objects: 120, by_visibility: {"public": 120}, shares: 1. No per-caller identity field present, confirming the note.
+Result: re-run under the Neurons shapes (wheel 0.4.0)
 
 **OWN-003 — GET /api/v1/ownership/dashboard/7 as owner Ada shows the full owner block**
 Preconditions: logged in as Ada.
@@ -243,20 +243,20 @@ Result: PASS — 200 with exact shape; GET as Ada listed Ben under shares immedi
 
 **OWN-029 — Share with a group in the caller's own tenant**
 Preconditions: dashboard 8 (Ada, shared).
-Steps: As Ada, `POST /dashboard/8/shares {"subject": "group:dashboard_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member", "role": "viewer"}`.
-Expected: `200`; every tenant-A user in `dashboard_designer_<A>` (Priya, Sofia, Grace) can now open dashboard 8 once the tuple delivers.
+Steps: As Ada, `POST /dashboard/8/shares {"subject": "group:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40.dashboard_designer#member", "role": "viewer"}`.
+Expected: `200`; every tenant-A user in `<A>.dashboard_designer` (Priya, Sofia, Grace) can now open dashboard 8 once the tuple delivers.
 Result: PASS — 200; Priya (member of dashboard_designer_A) got 200 on GET /dashboard/8 after the tuple delivered.
 
 **OWN-030 — Sharing with a group from the OTHER tenant is refused**
 Preconditions: dashboard 8 (Ada, tenant A, shared).
-Steps: As Ada, `POST /dashboard/8/shares {"subject": "group:dashboard_designer_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member", "role": "viewer"}` (tenant B's group).
+Steps: As Ada, `POST /dashboard/8/shares {"subject": "group:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92.dashboard_designer#member", "role": "viewer"}` (tenant B's group).
 Expected: `400 {"message": "group does not belong to your tenant"}` (`identity.group_belongs_to_tenant` check in `_validate_group_subject`, `api.py:486-487`); nothing written.
 Result: PASS — 400 with exact message.
 
 **OWN-031 — Sharing with a user from the other tenant is refused**
 Preconditions: dashboard 8 (Ada, tenant A, shared).
 Steps: As Ada, `POST /dashboard/8/shares {"subject": "user:9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76"}` (Cleo, tenant B).
-Expected: `400 {"message": "subject is not a member of your tenant"}` (`_confirm_tenant_membership`, `api.py:343`) — reached because Cleo's Superset account resolves to a `tenant_<B>` role that disagrees with tenant A, and the store confirms she is not in A.
+Expected: `400 {"message": "subject is not a member of your tenant"}` (`_confirm_tenant_membership`, `api.py:343`) — reached because Cleo's Superset account resolves to a `Tenant_<B>_Role` role that disagrees with tenant A, and the store confirms she is not in A.
 Result: PASS — 400 with exact message.
 
 **OWN-032 — Sharing on a PRIVATE object is refused with 409**
@@ -290,13 +290,13 @@ Expected: `202 {"object_id": 8, "subject": "user:9fcc709c-...", "queued": true, 
 Result: PASS — 202 with exact body {"mirror_row":false,"object_id":8,"queued":true,"subject":"user:9fcc709c-..."}.
 
 **OWN-037 — Revoking a GROUP subject with no mirror row is a clean 404, not queued**
-Preconditions: dashboard 8, shared, group `dashboard_designer_<A>` never shared to it.
-Steps: As Ada, `DELETE /dashboard/8/shares/group:dashboard_designer_a1e4c2d0-...#member`.
+Preconditions: dashboard 8, shared, group `<A>.dashboard_designer` never shared to it.
+Steps: As Ada, `DELETE /dashboard/8/shares/group:a1e4c2d0-....dashboard_designer#member`.
 Expected: `404 {"message": "no such share on this object"}` — a stray group revocation is deliberately not queued because the read path cannot tell who is in the group, so a near-certain no-op is not worth denying every non-owner for the delivery window (`api.py:2362-2369`).
 Result: PASS — 404 with exact message (not 202/queued, unlike the user-subject case in OWN-036/049).
 
 **OWN-038 — Private-revokes-all: setting visibility to private revokes every existing share (#93)**
-Preconditions: dashboard 8, `shared`, with Ben (viewer) and the `dashboard_designer_<A>` group both shared.
+Preconditions: dashboard 8, `shared`, with Ben (viewer) and the `<A>.dashboard_designer` group both shared.
 Steps: As Ada, `PUT /dashboard/8/visibility {"visibility": "private"}`. After the outbox drains, `GET /dashboard/8` as Ada and inspect `shares`.
 Expected: `200` on the PUT; `shares: []` on the subsequent GET — both mirror rows are gone; both a `revoke_subject` op per subject is queued through the same path the unshare route uses (`_revoke_shares_for_private`, `api.py:1718-1755`); Ben gets `404` immediately (the read gate denies private unconditionally for non-owners, independent of drain timing — `hooks.py:355-366`) even though the store tuple itself may still be draining. `POST /dashboard/8/shares` on this now-private object → `409` (OWN-032).
 Result: PASS — 200 on the PUT; Ben got 404 immediately (before drain); GET immediately after the PUT still showed both rows but flagged `"unmirrored": true` (pending-revocation state), and after the ~11s auto-drain window `shares: []`, confirming both are fully revoked; a further POST /shares returned 409 exactly as in OWN-032.
@@ -389,7 +389,7 @@ Result: PASS — substituted dashboard 11 (Cleo, tenant B) for dashboard 8 (Ada'
 
 **OWN-054 — Group subject that does not exist in the authorization store**
 Preconditions: a syntactically well-formed but nonexistent tenant-A group id.
-Steps: As Ada, `POST /dashboard/8/shares {"subject": "group:not_a_real_group_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member"}`.
+Steps: As Ada, `POST /dashboard/8/shares {"subject": "group:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40.not_a_real_group#member"}`.
 Expected: `400 {"message": "no such group in the authorization store"}` (`api.py:544-545`).
 Result: PASS — 400 with exact message.
 
@@ -628,10 +628,10 @@ Expected: HTTP response from the stock endpoint succeeds at the transport layer,
 Result: PASS — `PUT /api/v1/dashboard/8 {"editors":[9,10]}` (9=Ada's, 10=Ben's Subject id) returned 200 with `result.editors:[9,10]` at the transport layer, but an immediate re-read of `GET /api/v1/dashboard/8` showed `editors: [{"id":9,"label":"Ada tenant A"}]` only — Ben stripped. Confirmed via container logs: exact WARNING line `"superset_ownership: access fields corrected on dashboard 8 (private) -- ... direct editors stripped=1, direct editors added=0"` and an `AUDIT {'event': 'ownership.access_corrected', ...}` line with before/after `direct_editors` counts. Dashboard 8 restored to public afterward (editors already back to owner-only).
 
 **OWN-090 — A group editor share (no native Subject possible) works only through the dynamic resolver**
-Preconditions: dashboard 8, shared; group `dashboard_designer_<A>` shared as `role: "editor"`.
+Preconditions: dashboard 8, shared; group `<A>.dashboard_designer` shared as `role: "editor"`.
 Steps: As a member of that group (e.g. Priya), attempt to edit dashboard 8.
 Expected: succeeds — group editors are never materialized into the native `editors` collection at all (there is no Superset `Subject` for a bare OpenFGA group); they are only ever honored dynamically through `EXTRA_EDITORS_RESOLVER` (`hooks.py:453-457`), which is exactly the case native `editors` structurally cannot express. This case demonstrates why #80's fix (owner-only native editors) does not regress group-based editing.
-Result: FAIL — set dashboard 8 to shared and shared `group:dashboard_designer_<A>#member` as editor; confirmed via the OpenFGA store that both the `editor` tuple on the dashboard for that group AND Priya's `member` tuple on the group were present (so the grant fully delivered). Priya could view the dashboard (`can_manage: false` but `GET` 200, consistent with a shared/non-manager viewer), but a native edit attempt (`PUT /api/v1/dashboard/8 {"dashboard_title": "Video Game Sales"}`, a no-op rename) returned `403 {"message": "Forbidden"}`, retried once with the same result. This contradicts the expected "succeeds" outcome — the group-editor grant did not translate into native edit rights the way an individual user's editor share does (confirmed working for Ben in OWN-042). Cleaned up: group share removed, dashboard 8 restored to public.
+Result: FAIL — set dashboard 8 to shared and shared `group:<A>.dashboard_designer#member` as editor; confirmed via the OpenFGA store that both the `editor` tuple on the dashboard for that group AND Priya's `member` tuple on the group were present (so the grant fully delivered). Priya could view the dashboard (`can_manage: false` but `GET` 200, consistent with a shared/non-manager viewer), but a native edit attempt (`PUT /api/v1/dashboard/8 {"dashboard_title": "Video Game Sales"}`, a no-op rename) returned `403 {"message": "Forbidden"}`, retried once with the same result. This contradicts the expected "succeeds" outcome — the group-editor grant did not translate into native edit rights the way an individual user's editor share does (confirmed working for Ben in OWN-042). Cleaned up: group share removed, dashboard 8 restored to public.
 
 ---
 
@@ -725,20 +725,20 @@ Result: BLOCKED — genuinely unrunnable here for two independent reasons: (1) t
 Preconditions: logged in as Ada; Sharing drawer open on any tenant-A object, visibility `shared`.
 Steps: Open "Add users & groups"; observe the initial (empty-query) list and its Users/Groups tabs.
 Expected: only tenant-A people and groups appear (Ben, Marcus, Priya, Elena, David, Sofia, James, Aisha, Tom, Lena, Carlos, Yuki, Grace — 12 seeded people plus Ben — matches the "13 member(s)" figure seen in `plugin verify`'s output for tenant A); each row shows a display name over email, not a bare GUID; group rows show "<n> member(s) · from directory" (`SubjectPickerPanel.tsx`, and `directory.py:439-446`).
-Result: PASS — UI step done via API equivalent (`GET /api/v1/ownership/subjects?q=` as Ada, no browser used per instructions); returns exactly the 9 tenant-A groups and all 14 tenant-A users (12 named people + Ben + Ada herself) with `text` = display name, `extra.email` = real seeded email, no bare GUID exposed; live `plugin verify --tenant <A>` reports "14 member(s)" (doc's "13" note is stale — Ada is now also enumerated). No tenant-B subjects present.
-Evidence: subjects response tenant=a1e4c2d0-...; users=[Priya,Marcus,Elena,David,Sofia,James,Aisha,Tom,Lena,Carlos,Yuki,Grace,Ada,Ben]; groups=9 (dashboard_designer, data_analyst, chart_designer, marketing_analytics, finance_reporting, engineering_metrics, support_ops, executives, tenant_administrator). Group-row "<n> member(s) · from directory" label text is frontend-rendered only, not present in the raw API payload — not independently verifiable without the UI pass.
+Result: re-run under the Neurons shapes (wheel 0.4.0)
+Evidence: (previous run, pre-Neurons shapes; re-run.) Group-row "<n> member(s) · from directory" label text is frontend-rendered only, not present in the raw API payload — not independently verifiable without the UI pass.
 
 **OWN-105 — Groups list reflects the seeded group set, tenant A vs tenant B**
 Preconditions: Sharing drawer / picker open as Ada (tenant A) and separately as Cleo (tenant B).
 Steps: Switch to the Groups tab in each session; record the group names shown.
-Expected: tenant A shows `dashboard_designer`, `data_analyst`, `chart_designer`, `marketing_analytics`, `finance_reporting`, `engineering_metrics`, `support_ops`, `executives`, `tenant_administrator` (9 groups per `fga-sqllab-monitoring.md`'s tuple count note); tenant B shows `dashboard_designer`, `data_analyst`, `sales_ops`, `chart_designer`, `executives`, `support_ops`, `finance_reporting`, `tenant_administrator` (8 groups); neither list includes the other tenant's groups.
-Result: PASS — UI step done via API equivalent (`GET /api/v1/ownership/subjects?q=` as Ada and separately as Cleo). Ada's (tenant A) group tab = exactly the 9 expected names; Cleo's (tenant B) group tab = exactly the 8 expected names. No cross-tenant leakage either direction.
+Expected: tenant A shows `dashboard_designer`, `data_analyst`, `chart_designer`, `marketing_analytics`, `finance_reporting`, `engineering_metrics`, `support_ops`, `executives` (8 groups; there is no `tenant_administrator` group — administrators are the `admin` relation on the tenant); tenant B shows `dashboard_designer`, `data_analyst`, `sales_ops`, `chart_designer`, `executives`, `support_ops`, `finance_reporting` (7 groups)ant_administrator` (8 groups); neither list includes the other tenant's groups.
+Result: re-run under the Neurons shapes (wheel 0.4.0)
 
-**OWN-106 — Group id format matches `OWNERSHIP_GROUP_ID_FORMAT` (default `{name}_{tenant}`)**
+**OWN-106 — Group id format matches `OWNERSHIP_GROUP_ID_FORMAT` (default `{tenant}.{name}`)**
 Preconditions: any share written to a group in this environment (e.g. OWN-029).
 Steps: Inspect the written `subject` string in the audit log, the OpenFGA tuple (`fga_tuple` SQL Lab view), or the `POST /shares` payload used.
-Expected: the group half of the subject string is exactly `<name>_<tenant-guid>`, e.g. `group:dashboard_designer_a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40#member` — the default `GROUP_ID_FORMAT_SUFFIX = "{name}_{tenant}"` (`identity.py:144-146`). If this environment instead configures the alternate `{tenant}_{name}` ("SOW") shape, the id order will be reversed — confirm which format is actually configured before asserting the exact string.
-Result: PASS — set dashboard 11 (Cleo, tenant B, no active shares) to `shared` and `POST /dashboard/11/shares {"subject":"group:dashboard_designer_b7f28e5a-...-#member","role":"viewer"}` as Cleo; response and the drained OpenFGA tuple both show `group:dashboard_designer_b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92#member` — exact `{name}_{tenant}` order. Reverted afterward (share removed, visibility restored to `public`).
+Expected: the group half of the subject string is exactly `<tenant-guid>.<name>`, e.g. `group:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40.dashboard_designer#member` — Neurons' `GROUP_ID_FORMAT_NEURONS = "{tenant}.{name}"`, the default. If this environment instead configures `{name}_{tenant}` (a store written before the confirmation), the id order will be reversed — confirm which format is actually configured before asserting the exact string.
+Result: re-run under the Neurons shapes (wheel 0.4.0)
 
 **OWN-107 — `superset ownership plugin describe` (or the equivalent CLI) enumerates all 16 configured function hooks**
 Steps: `docker exec pcssetup-superset-1 superset ownership plugin describe` (verify exact subcommand name in this build's `cli_plugin.py`).
@@ -751,11 +751,11 @@ Steps: Configure/observe a hook that attempts to grant `manage_reason` to a call
 Expected: the widened answer is ignored/logged, not honored — `plugin_hooks.narrow_manage_reason` only accepts `None` or the SAME reason the default already computed (`api.py:852-869`); confirm via a `POST .../shares` attempt from the "widened" caller still returns `403`.
 Result: BLOCKED — not applicable. `plugin describe` (OWN-107) shows `OWNERSHIP_CAN_MANAGE: {"source": "default"}` — no custom hook is configured in this environment, so there is nothing to narrow; skipped per the case's own precondition.
 
-**OWN-109 — Group membership resolution via nested group is honored (tenant admin auto-included in `dashboard_designer`)**
-Preconditions: `seed_fga_extra.py`'s nested tuple: every tenant administrator is also a member of `dashboard_designer_<tenant>` (`{admin_group}#member` member of `dashboard_designer`).
-Steps: Share an object with `group:dashboard_designer_a1e4c2d0-...#member`, viewer. As Ada (tenant admin, nested into that group), confirm she can open it purely via the group grant (temporarily as a non-owner, non-admin caller if feasible — otherwise confirm via a direct OpenFGA `check` call for `user:<Ada's guid> viewer <object>` isolating the group path).
+**OWN-109 — Group membership resolution via nested group is honored (chart designers nested into `dashboard_designer`)**
+Preconditions: `seed_fga_extra.py`'s nested tuple: `group:<tenant>.chart_designer#member` is a member of `group:<tenant>.dashboard_designer`; Ben is a chart designer of tenant A.
+Steps: Share an object with `group:a1e4c2d0-....dashboard_designer#member`, viewer. As Ben (not a dashboard designer directly), confirm he can open it purely via the nested group grant — or confirm via a direct OpenFGA `check` call for `user:<A>.<Ben's guid> viewer <object>` isolating the group path.
 Expected: access granted through the one-level group nesting (`group:X#member` as a member of `group:Y`, per the FGA model `define member: [user, group#member]`, `model/ownership.fga:31`).
-Result: PASS — isolated via direct OpenFGA calls (no real object touched): confirmed the seeded nested tuple `group:tenant_administrator_a1e4c2d0-...#member` → `member` of `group:dashboard_designer_a1e4c2d0-...`; wrote a temporary `viewer` tuple for `group:dashboard_designer_a1e4c2d0-...#member` on a synthetic test object, then `check user:3f0a91c7-...(Ada) viewer dashboard:own109-test-obj` returned `allowed:true`; also `check user:Ada member group:dashboard_designer_a1e4c2d0-...` returned `allowed:true`. Synthetic tuple deleted afterward — no lasting change.
+Result: re-run under the Neurons shapes (wheel 0.4.0)
 
 ---
 
@@ -834,13 +834,13 @@ Result: PASS — same Tenant B substitution (dashboard 11 / Omar): `DELETE /dash
 
 **OWN-122 — Neurons users/groups summary views reflect the seeded directory correctly**
 Steps: In SQL Lab (connection 2), run the "Neurons users" and "Neurons groups" queries from `fga-sqllab-monitoring.md`.
-Expected: users view returns the expected count of tenant-membership tuples (22 at the time these notes were written — reconfirm the live count) split correctly A vs B; groups view returns one row per group with a correct member count and names matching `ab_user`.
-Result: PASS — Neurons users: 22 rows total, 14 Tenant A / 8 Tenant B — matches the documented count exactly. Neurons groups: 17 rows (9 Tenant A groups, 8 Tenant B groups), member counts per group look sane (e.g. tenant A data_analyst=4, tenant B tenant_administrator=1).
+Expected: users view returns the expected count of tenant-membership tuples (22 at the time these notes were written — reconfirm the live count) split correctly A vs B, `user_id` = the member half of `user:<tenant>.<member>`; groups view returns one row per group (8 in A, 7 in B) with a correct member count and names matching `ab_user`.
+Result: re-run under the Neurons shapes (wheel 0.4.0)
 
 **OWN-123 — "Users → tenant admin flag, groups, ownership counts" view correctly flags Ada and Cleo as tenant admins**
 Steps: Run the third query block from `fga-sqllab-monitoring.md` (the `WITH t AS (...) ... tenant_admin` query).
-Expected: Ada's row shows `tenant_admin = 'yes'`, `groups` including `tenant_administrator` and `dashboard_designer` (nested membership); Cleo's row shows `tenant_admin = 'yes'` for tenant B; every other seeded persona shows blank in that column; `dashboards_owned`/`charts_owned` roughly match the known ownership assignments (Ada: dashboards 7, 8, 10 + chart 78, etc.).
-Result: FAIL — Ada's row: `tenant_admin='yes'` (correct) but `groups='tenant_administrator'` only — `dashboard_designer` does NOT appear, contrary to the expected text. Cause: the `groups_of` CTE only aggregates `fga_tuple` rows with `user_type='user'` on `group`/`member`, so it captures direct user→group tuples but not the nested `group:tenant_administrator_<A>#member`→`group:dashboard_designer_<A>` userset tuple (same "usersets are not expanded" limitation `fga-sqllab-monitoring.md` documents elsewhere for the raw changelog query) — the query itself, not ownership sharing, doesn't surface nested group membership. Cleo's row correctly shows `tenant_admin='yes'`; every other persona blank in that column (correct); Ada dashboards_owned=3/charts_owned=26, Cleo dashboards_owned=1/charts_owned=5 — both roughly match known assignments (correct).
+Expected: Ada's row shows `tenant_admin = 'yes'` (from the `admin` tuple on `tenant:<A>`) and `groups` = `dashboard_designer`; Cleo's row shows `tenant_admin = 'yes'` for tenant B; every other seeded persona shows blank in that column; `dashboards_owned`/`charts_owned` roughly match the known ownership assignments (Ada: dashboards 7, 8, 10 + chart 78, etc.).
+Result: re-run under the Neurons shapes (wheel 0.4.0)
 
 **OWN-124 — Store health/tuple counts are sane after a full test pass**
 Steps: `SELECT store, count(*) FROM fga_tuple GROUP BY 1;` (connection 1) after completing Sections 2–5.
@@ -910,7 +910,7 @@ Result: PASS — used dashboard 11 (Cleo). Wrote a `viewer` tuple for Hannah Ber
 ---
 
 **OWN-135 — Full cycle, login by login: public -> shared (nobody) hides the chart from Ben; adding Ben shows it again**
-Preconditions: chart 78 "Girl Name Cloud" owned by Ada, `public`, on public dashboard 7 "USA Births Names". Ben is a tenant A member (and in `group:chart_designer_<A>`). Cleo is in tenant B. Log out at /logout/ between personas.
+Preconditions: chart 78 "Girl Name Cloud" owned by Ada, `public`, on public dashboard 7 "USA Births Names". Ben is a tenant A member (and in `group:<A>.chart_designer`). Cleo is in tenant B. Log out at /logout/ between personas.
 Steps (UI): (1) Ada (`3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31`/test1234): Charts -> "Girl Name Cloud" -> note Owner/Sharing columns. (2) Ben (`6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53`/test1234): Charts list; dashboard 7. (3) Ada: Sharing drawer on the chart. (4) Ben: as (2). (5) Ada: Sharing -> Shared, add nobody, Apply. (6) Ben: Charts list; dashboard 7; /explore/?slice_id=78. (7) Ada: open the drawer. (8) Ada: Add users & groups -> Users -> "Ben tenant A" -> Confirm -> Apply. (9) Ben: after ~10 s, Charts list; dashboard 7. Then repeat (5)/(8) by removing and re-adding Ben; finally Ada -> Public -> Apply.
 Steps (API): after each Apply, as Ben `GET /api/v1/chart/78`, `GET /api/v1/dashboard/7/charts`; `POST http://localhost:8199/stores/<store>/read {"tuple_key":{"object":"chart:<uuid of 78>"}}`.
 Expected: (1) listed, Owner "Ada tenant A", Sharing "Public". (2) listed for Ben; tile renders; `GET /api/v1/chart/78` -> 200. (3) drawer: Owner Ada, Public selected. (4) unchanged. (5) Sharing "Shared", "Shared with 0 users"; no viewer tuple in OpenFGA. (6) chart absent from Ben's list; `GET /api/v1/chart/78` -> 404; dashboard payload for chart 78 carries `has_access: false, owners: ["Ada tenant A"]` and no `form_data`; tile shows the placeholder naming Ada; explore shows no data. (7) drawer still Shared, empty list. (8) "Shared with 1 user"; within ~10 s a `user:6c2b48e9-... viewer chart:<uuid>` tuple exists. (9) chart back in Ben's list, `GET /api/v1/chart/78` -> 200, tile renders with data. Each later removal/re-add repeats (6)/(9); removal is effective on Ben's next request, a grant after the outbox drain. Cleo: 404 / absent in every state. `superset ownership check` -> `ok: true` at the end, chart 78 `public`, no shares.
@@ -938,7 +938,7 @@ Expected: the tenant-B chart entries carry `has_access: false`, no `form_data`, 
 Result:
 
 **OWN-139 — An object outside every tenant is visible to nobody in a tenant until it is stamped; `check` tells the two cases apart**
-Preconditions: logged in as `admin` (no `tenant_<guid>` role).
+Preconditions: logged in as `admin` (no `Tenant_<guid>_Role` role).
 Steps: As admin create a chart (`POST /api/v1/chart/` on `birth_names`, or via Explore -> Save) and set it `public` through `PUT /api/v1/ownership/chart/<id>/visibility`. `GET /api/v1/chart/<id>` as admin, Ada, Cleo. `superset ownership check`. Then, on a tenant-A public chart of Ada's, `UPDATE ownership_object SET tenant_guid = NULL WHERE asset_type='chart' AND object_id=<id>` (wait 12 s for the lookup cache), `GET` it as Ben and as Ada, run `check`, then `superset ownership backfill-tenants`, `GET` as Ben again, `check`.
 Expected: admin `200`, Ada `404`, Cleo `404` on the admin's chart; `check` lists it under `untenanted_public` but not `untenanted_public_repairable` and stays `ok: true` (its owner has no tenant — nothing to stamp). Ada's blanked chart: Ben `404` (closed until stamped), Ada `200` (the owner always reads); `check` → `ok: false`, `untenanted_public_repairable: ["chart:<id>"]`; after `backfill-tenants` the row is tenant A again, Ben `200`, `check` ok. Delete the admin's chart afterwards.
 Result:
@@ -966,6 +966,47 @@ Steps (UI): (1) Ada: Charts -> the chart -> row action **Sharing**. (2) Ada: cli
 Expected: (1) a warning notice at the top: "You are not the owner of this object; Marcus Chen is. As an administrator of this tenant you can transfer its ownership, but only its owner can change how it is shared. To change the sharing, take ownership first."; Owner: Marcus Chen with **Take ownership** and **Transfer ownership** links; Private/Shared/Public greyed out; no Apply, a Close button. (2) green banner "Ownership transferred to Ada tenant A. You still manage this object as its owner."; Owner: Ada tenant A; the notice and Take ownership are gone; the options are live; the list behind shows Ada as owner. (3) Sharing column reads Shared; the drawer says "Shared with 1 user". (4) banner "Ownership transferred to Marcus Chen. You still manage this object as a tenant administrator."; Owner: Marcus Chen. (5) the notice and greyed-out options are back; Take ownership is offered again; Ben's share is listed but nothing can be changed. (6) the chart is in Ben's list and opens (the share Ada made as owner stays). API: while Marcus owns it, `PUT .../visibility` and `POST/DELETE .../shares` as Ada answer `403` "take ownership of it first"; `GET` shows `can_manage: true, can_share: false, manage_reason: "tenant_admin"`. A Superset admin is not narrowed this way, and neither is a holder of `OWNERSHIP_MANAGE_PERMISSION` (a tenant administrator who also holds it shares on that permission's ground).
 Result:
 
+## 15. Neurons id shapes (`Tenant_<guid>_Role`, `user:<tenant>.<member>`, `group:<tenant>.<name>`, `tenant#admin`; PR #113)
+
+**OWN-144 — A person is spelt `user:<tenant>.<member>` in every tuple this module writes**
+Preconditions: Ada owns dashboard 8; Ben is a tenant A member. Store id from `store.env`.
+Steps: As Ada, set dashboard 8 to `shared` and `POST /dashboard/8/shares {"subject": "user:6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53", "role": "viewer"}` (the BARE member GUID, as the picker sends it). Wait for the outbox drain. Read the object's tuples: `curl -X POST http://localhost:8199/stores/<store>/read -d '{"tuple_key": {"object": "dashboard:<uuid>"}}'`.
+Expected: the response echoes `"subject": "user:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40.6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53"`; the store holds `user:<A>.<ben> viewer`, `user:<A>.<ada> owner` and `tenant:<A>#member tenant` — never a bare `user:<guid>`. `GET /dashboard/8` shows `caller_subject` and the owner's `guid` in the dotted spelling; the share row's display is "Ben tenant A", not a GUID.
+Result:
+
+**OWN-145 — Another tenant's spelling of a member names nobody**
+Steps: As Ada, `POST /dashboard/8/shares {"subject": "user:b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92.6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53", "role": "viewer"}` (Ben with tenant B's GUID in front).
+Expected: `400 {"message": "subject does not name a known account"}`; no tuple written (the outbox has nothing pending for the object). The same request with Ben's own tenant in front, or the bare GUID, is accepted.
+Result:
+
+**OWN-146 — The tenant administrator is the `admin` relation on the tenant object, read live**
+Preconditions: store id from `store.env`.
+Steps: (1) `curl -X POST http://localhost:8199/stores/<store>/read -d '{"tuple_key": {"object": "tenant:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40", "relation": "admin"}}'`. (2) As Ada, `GET /api/v1/ownership/chart/<a chart owned by Marcus>`. (3) Delete the tuple through the OpenFGA API (`/write` with `deletes`), repeat (2), then write it back.
+Expected: (1) exactly one tuple, `user:<A>.<ada> admin tenant:<A>`; no `tenant_administrator` group anywhere in the store. (2) `manage_reason: "tenant_admin"`, `can_share: false`. (3) with the tuple gone the same GET answers `404` (Ada is an ordinary member again; the platform's relation is the only source, the module never writes it); restored, `tenant_admin` is back within `OWNERSHIP_LOOKUP_CACHE_TTL` seconds.
+Result:
+
+**OWN-147 — Group ids carry the tenant in front and nest as-is; no group-to-tenant tuple**
+Steps: (1) As Ada, open the picker's Groups tab; (2) `POST /dashboard/8/shares {"subject": "group:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40.dashboard_designer#member", "role": "viewer"}`; drain; (3) log in as Ben (a chart designer, not a dashboard designer) and open dashboard 8; (4) `curl ... /read -d '{"tuple_key": {"relation": "tenant", "object": "group:a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40.dashboard_designer"}}'`.
+Expected: (1) the eight tenant A groups by display name ("dashboard designer", "7 member(s) · from directory"), listed by the member walk (`OWNERSHIP_DIRECTORY_GROUP_WALK=always`); (2) `200`, the tuple is `group:<A>.dashboard_designer#member viewer`; (3) Ben reads it through `group:<A>.chart_designer#member member group:<A>.dashboard_designer` (nested); (4) `tuples: []` — Neurons writes no group-to-tenant tuple and nothing here needs one.
+Result:
+
+**OWN-148 — `plugin verify` passes on the Neurons shapes**
+Steps: `docker exec pcssetup-superset-1 superset ownership plugin verify --tenant a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40 --sample-users 40`; repeat for tenant B.
+Expected: no FAIL. In particular `group_has_tenant_tuple` PASS "no tenant tuples; N group(s) walked (OWNERSHIP_DIRECTORY_GROUP_WALK=always)", `administrator_group_exists` PASS "tenant:<t>#admin has 1 administrator(s)", `guid_v4` / `tenant_known` / `normalize_subject_roundtrip` PASS for every sampled member (their `member_guid` is `<tenant>.<member>`), `shape_pair_roundtrip` PASS, `no_member_in_two_tenants` PASS. Only `model_pinned` may WARN when the model is not pinned.
+Result:
+
+**OWN-149 — A pre-upgrade `user:<member>` share row is reported by `check`, removable, and re-shareable**
+Preconditions: a scratch object owned by Ada, `shared`. This simulates a store written before the ids carried the tenant.
+Steps: (1) In the metadata DB: `INSERT INTO ownership_share (asset_type, object_id, subject, role) VALUES ('dashboard', 8, 'user:6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53', 'viewer')`, and write the matching bare tuple to the store by hand. (2) `superset ownership check`. (3) As Ben, open dashboard 8. (4) As Ada, `DELETE /dashboard/8/shares/user:6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53`; drain. (5) `check` again; then share Ben again through the picker.
+Expected: (2) `user_id_mismatch: ["user:6c2b48e9-..."]`, `ok: false`, and the boot log's ERROR line naming the row. (3) `404` — the old spelling grants nothing. (4) `200` with `"subject": "user:6c2b48e9-..."` (the row's own spelling, no `queued`/`mirror_row: false`); the mirror row and the bare tuple are both gone. (5) `user_id_mismatch: []`, `ok: true`; the re-share lists Ben once, as `user:<A>.<ben>`, and Ben can open the dashboard.
+Result:
+
+**OWN-150 — `teardown` then `db upgrade` reinstalls cleanly**
+Preconditions: a disposable scratch stack only (this destroys every ownership row).
+Steps: `docker exec pcssetup-superset-1 sh -c 'echo y | superset ownership teardown'`; then `superset ownership db upgrade`; then `superset ownership db current`; then restart `superset` so the entrypoint's backfill and `check` run.
+Expected: teardown's JSON reports `tables_dropped` (the three tables) and `chain_forgotten: true`; `db upgrade` logs `Running upgrade -> 0001_object_ownership` through `0004_ownership_object_tenant` (the chain runs from the start, not a no-op); `db current` shows `0004_ownership_object_tenant`; after the restart `check` is `ok: true` with every object backfilled public again.
+Result:
+
 ## Coverage map
 
 | Area | Case IDs |
@@ -973,6 +1014,7 @@ Result:
 | 1. Login/identity & tenant scoping of lists | OWN-001 – OWN-009 |
 | 13. Public within the tenant | OWN-136 – OWN-142 |
 | 14. Tenant administrator: transfer, not sharing | OWN-143 |
+| 15. Neurons id shapes | OWN-144 – OWN-150 |
 | 2. Visibility state machine (dashboards & charts) | OWN-010 – OWN-027 |
 | 3. Sharing (+ OWN-135 walkthrough) | OWN-028 – OWN-055, OWN-135 |
 | 4. Placeholder tile & data path | OWN-056 – OWN-067 |
@@ -985,7 +1027,7 @@ Result:
 | 11. Monitoring (OpenFGA API + SQL Lab) | OWN-119 – OWN-124 |
 | 12. Negative / edge cases | OWN-125 – OWN-134 |
 
-**Total: 142 cases.**
+**Total: 150 cases.**
 
 ## Known open issues (do not report these as new findings — track against the linked issue instead)
 

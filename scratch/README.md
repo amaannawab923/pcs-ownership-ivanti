@@ -107,10 +107,13 @@ mapping, and each script's own header for the full reasoning):
    both run **verbatim** -- neither hardcodes FGA/STORE/PYTHONPATH, both
    resolve the connection from the running app's own config, which by now
    points at the scratch store. Plus `scratch/seed_fga_extra.py` (see its
-   own header): additive tuples neither qa script writes -- each group's
-   `tenant` relation, the `tenant_administrator_<tenant>` groups (Ada
-   administers tenant A, Cleo tenant B), and the nested "every tenant
-   administrator is also a dashboard_designer" membership.
+   own header): what Neurons' platform writes and neither qa script does
+   -- the three identity members' tenant membership, each tenant's
+   administrator as the `admin` relation on the tenant object (Ada
+   administers tenant A, Cleo tenant B), and the nested "chart designers
+   are dashboard designers too" membership. No group-to-tenant tuple:
+   Neurons carries the tenant in the group id and the config layer sets
+   `OWNERSHIP_DIRECTORY_GROUP_WALK = "always"`.
 5. `scratch/seed_tenant_data.py`: real row-level tenancy -- see "The data
    model" below. This REPLACES `overlay/qa/seed_tenant_env.py` in this
    pipeline; see that script's own header for why (it binds every dataset
@@ -276,8 +279,8 @@ resolution is superseded by the stronger, dataset-access-aware invariant
 Scratch-only additions:
 
 - `scratch/seed_fga_extra.py` -- additive OpenFGA tuples `seed_directory.py`
-  does not write (group `tenant` relations, `tenant_administrator_<tenant>`
-  groups, nested membership). See its own header for exactly why.
+  does not write (identity members' tenant membership, the `admin`
+  relation on each tenant, nested membership). See its own header.
 - `scratch/seed_tenant_data.py` -- real row-level tenancy: shared datasets
   with a `tenant_id` column + per-tenant RLS, exclusive dataset binding
   (see above), and the Neurons-shaped synthetic dataset + dashboards.

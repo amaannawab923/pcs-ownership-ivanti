@@ -269,6 +269,33 @@ def test_fresh_schema_matches_module_metadata(tmp_path):
         )
 
 
+def test_forget_lets_the_chain_run_again_after_a_teardown(tmp_path):
+    """`lifecycle.teardown` drops the module's tables and then calls
+    `migrate.forget`: without it the version row stayed at head, `upgrade`
+    was a no-op and an uninstalled feature could not be installed again."""
+    from sqlalchemy import create_engine
+
+    uri = _uri(tmp_path)
+    migrate.upgrade("head", uri)
+    ownership_db.metadata.drop_all(bind=create_engine(uri), checkfirst=True)
+    assert migrate.current(uri) == HEAD_REVISION, "the stale state teardown left"
+
+    assert migrate.forget(database_uri=uri) is True
+    assert migrate.current(uri) is None
+    assert migrate.forget(database_uri=uri) is False
+
+    # A Connection bind, inside the caller's own transaction (review nit).
+    migrate.upgrade("head", uri)
+    engine = create_engine(uri)
+    with engine.begin() as conn:
+        assert migrate.forget(bind=conn) is True
+    assert migrate.current(uri) is None
+
+    migrate.upgrade("head", uri)
+    assert migrate.current(uri) == HEAD_REVISION
+    assert OUR_TABLES <= _tables(uri)
+
+
 # --------------------------------------------------------------------------- 2. idempotent
 
 

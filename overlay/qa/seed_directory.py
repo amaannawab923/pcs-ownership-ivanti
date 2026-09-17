@@ -59,7 +59,8 @@ def guid_for(key: str) -> str:
     return f"{h[0:8]}-{h[8:12]}-4{h[13:16]}-{variant}{h[17:20]}-{h[20:32]}"
 
 
-# (first, last, [group short-names]) -- groups become group:<name>_<tenant>.
+# (first, last, [group short-names]) -- groups become group:<tenant>.<name>
+# (OWNERSHIP_GROUP_ID_FORMAT; Neurons' shape by default).
 # The existing Ada/Ben/Cleo and their groups are left as-is; these are added.
 DIRECTORY = {
     TENANT_A: [
@@ -92,14 +93,19 @@ def run() -> None:
     from superset import db, security_manager as sm
 
     from superset_ownership import fga
-    from superset_ownership.identity import group_object
+    from superset_ownership.identity import (
+        compose_subject_id,
+        group_object,
+        tenant_role_name,
+    )
 
     gamma = sm.find_role("Gamma")
     made = {"users": 0, "existing_users": 0, "member_tuples": 0, "group_tuples": 0}
     groups_seen: dict[str, set] = {}
 
     for tenant, people in DIRECTORY.items():
-        role_name = f"tenant_{tenant}"
+        # Neurons' JIT-provisioned tenant role: `Tenant_<guid>_Role`.
+        role_name = tenant_role_name(tenant)
         role = sm.find_role(role_name) or sm.add_role(role_name)
         db.session.commit()
 
@@ -116,12 +122,15 @@ def run() -> None:
                 db.session.commit()
                 made["existing_users"] += 1
 
-            # tenant membership + group memberships, in OpenFGA
-            if fga.write_tuple(f"user:{guid}", "member", f"tenant:{tenant}"):
+            # tenant membership + group memberships, in OpenFGA -- the
+            # person spelled the way Neurons writes them:
+            # `user:<tenant-guid>.<member-guid>`.
+            subject = f"user:{compose_subject_id(tenant, guid)}"
+            if fga.write_tuple(subject, "member", f"tenant:{tenant}"):
                 made["member_tuples"] += 1
             for g in groups:
                 grp = group_object(g, tenant)
-                if fga.write_tuple(f"user:{guid}", "member", grp):
+                if fga.write_tuple(subject, "member", grp):
                     made["group_tuples"] += 1
                 groups_seen.setdefault(tenant, set()).add(g)
 

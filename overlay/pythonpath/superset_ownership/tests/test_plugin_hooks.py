@@ -900,14 +900,15 @@ def test_is_tenant_administrator_default_path_uses_the_directory_not_the_authori
     admin_person = harness.add_person(
         "hooktenantadmin2", "HookTenantAdmin2", "Gamma", f"tenant_{tenant}"
     )
-    group_bare_name = tenant_administrator_group(tenant).split(":", 1)[1]
+    # `tenant:<t>#admin`: the admin relation on the tenant object.
+    assert tenant_administrator_group(tenant) == f"tenant:{tenant}#admin"
 
     with harness.ctx():
         from flask import current_app
 
         admin_user = harness._user(admin_person)  # noqa: SLF001
         admin_guid = resolve_member_guid(admin_user)
-        harness.authorizer.groups[group_bare_name] = {f"user:{admin_guid}"}
+        harness.authorizer.make_tenant_administrator(f"user:{admin_guid}", tenant)
         reg = current_app.extensions[plugins.EXT_KEY]
         try:
             with plugins.counting() as log:
@@ -919,7 +920,9 @@ def test_is_tenant_administrator_default_path_uses_the_directory_not_the_authori
             assert log == ["user_in_group"]
             assert "OWNERSHIP_IS_TENANT_ADMINISTRATOR" not in reg.hooks.callables
         finally:
-            harness.authorizer.groups.pop(group_bare_name, None)
+            harness.authorizer.tuples.discard(
+                (f"user:{admin_guid}", "admin", f"tenant:{tenant}")
+            )
 
 
 def test_can_manage_hook_narrows_the_owner_to_denied_on_the_share_route(harness):

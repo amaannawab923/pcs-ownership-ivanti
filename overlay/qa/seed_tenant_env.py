@@ -68,7 +68,11 @@ def run() -> None:
     from superset.utils.core import RowLevelSecurityFilterType
 
     from superset_ownership import fga
-    from superset_ownership.identity import tenant_administrator_group
+    from superset_ownership.identity import (
+        compose_subject_id,
+        split_userset,
+        tenant_administrator_group,
+    )
 
     tables = db.session.query(SqlaTable).order_by(SqlaTable.id).all()
 
@@ -87,7 +91,10 @@ def run() -> None:
 
     for t in tables:
         tenant = assignment[t.id]
-        role = sm.find_role(f"tenant_{tenant}") or sm.add_role(f"tenant_{tenant}")
+        from superset_ownership.identity import tenant_role_name
+
+        role_name = tenant_role_name(tenant)
+        role = sm.find_role(role_name) or sm.add_role(role_name)
         db.session.commit()
 
         # ---- 2a. datasource_access grant -----------------------------------
@@ -119,7 +126,7 @@ def run() -> None:
                 name=name,
                 description=f"Binds {t.table_name} to tenant {tenant}",
                 filter_type=RowLevelSecurityFilterType.REGULAR.value,
-                group_key=f"tenant_{tenant}",
+                group_key=role_name,
                 # The datasets are partitioned per tenant here, so isolation
                 # comes from the binding itself; the clause is a no-op that
                 # keeps the filter structurally real.
@@ -138,9 +145,14 @@ def run() -> None:
         if user is None:
             print(f"MARK WARNING: no Superset user {guid} for tenant {tenant}")
             continue
-        if fga.write_tuple(f"user:{guid}", "member", f"tenant:{tenant}"):
+        # Neurons' spelling of the person, and their `admin` relation on the
+        # tenant object (what `tenant_administrator_group` names by default;
+        # a group when the shape hook says so).
+        subject = f"user:{compose_subject_id(tenant, guid)}"
+        if fga.write_tuple(subject, "member", f"tenant:{tenant}"):
             made["tenant_tuples"] += 1
-        if fga.write_tuple(f"user:{guid}", "member", tenant_administrator_group(tenant)):
+        admin_obj, admin_relation = split_userset(tenant_administrator_group(tenant))
+        if fga.write_tuple(subject, admin_relation, admin_obj):
             made["admins"] += 1
 
     # ---- 4. cross-tenant dashboards need a HUMAN decision -------------------

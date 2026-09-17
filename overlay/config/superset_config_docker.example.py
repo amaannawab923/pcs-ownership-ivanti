@@ -58,16 +58,22 @@ OWNERSHIP_FGA_CREDENTIALS = {"type": "none"}
 # ...or a provider you write, for vaults / rotation / per-environment lookup:
 # OWNERSHIP_FGA_CONFIG_PROVIDER = "ivanti_pcs_example.fga:connection"
 
-# Who is who. Defaults assume the member GUID lands on the Superset
-# username and the tenant on a `tenant_<guid>` FAB role. Override only if
-# your JIT login puts the member id elsewhere:
+# Who is who. Defaults are Neurons' (PCS-10243, confirmed by Ivanti): the
+# member GUID (the token's `sub`) is the Superset username, the tenant
+# (`tid`) is the `Tenant_<guid>_Role` FAB role, and the store spells a
+# person `user:<tenant>.<member>`. Override only if your JIT login puts
+# the member id elsewhere:
 # OWNERSHIP_IDENTITY = "ivanti_pcs_example.identity:AttributeIdentity"
 
 # The directory: users, groups, members, administrators of a tenant.
 OWNERSHIP_DIRECTORY = "openfga"  # default: read from the store
 # OWNERSHIP_DIRECTORY = "ivanti_pcs_example.directory:FixedGroupsDirectory"
 
-OWNERSHIP_GROUP_ID_FORMAT = "{name}_{tenant}"  # or "{tenant}_{name}"
+OWNERSHIP_GROUP_ID_FORMAT = "{tenant}.{name}"  # Neurons' `group:<tenant>.<local id>`; "{name}_{tenant}" for a store written before the confirmation
+# Neurons writes no group-to-tenant tuple (the tenant is read from the group
+# id), so list a tenant's groups by walking its members outright rather than
+# reading an always-empty `group#tenant` page first and warning about it.
+OWNERSHIP_DIRECTORY_GROUP_WALK = "always"
 OWNERSHIP_PUBLIC_SCOPE = "tenant"  # public = within the object's tenant; "instance": dataset grant alone
 OWNERSHIP_MANAGE_PERMISSION = None  # optional sharing-manager role
 OWNERSHIP_OUTBOX_ENABLED = True

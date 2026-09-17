@@ -83,10 +83,10 @@ CLEO=9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76  # tenant B
 
 # Role groups are per-tenant: a dashboard designer in tenant A is not one in
 # tenant B. The group id carries the tenant so the two can never collide --
-# and WHERE it carries it is OWNERSHIP_GROUP_ID_FORMAT ("{name}_{tenant}" by
-# default, "{tenant}_{name}" for the SOW's tenant-prefixed shape), read by
-# the module's own helper (validated above). Export the same value to both
-# this seed and the running instance.
+# and WHERE it carries it is OWNERSHIP_GROUP_ID_FORMAT ("{tenant}.{name}" by
+# default, Neurons' shape; "{name}_{tenant}" for a store written before the
+# confirmation), read by the module's own helper (validated above). Export
+# the same value to both this seed and the running instance.
 group_object() {
   python3 -c '
 import sys
@@ -97,8 +97,13 @@ print(group_object(sys.argv[1], sys.argv[2]))
 }
 DD_A=$(group_object dashboard_designer "$TENANT_A")
 CD_A=$(group_object chart_designer "$TENANT_A")
-TA_A=$(group_object tenant_administrator "$TENANT_A")
 DD_B=$(group_object dashboard_designer "$TENANT_B")
+# A person in the store is `user:<tenant-guid>.<member-guid>` (Neurons'
+# spelling, confirmed by Ivanti); a tenant administrator is the `admin`
+# relation on the tenant object, not a group.
+U_ADA="user:$TENANT_A.$ADA"
+U_BEN="user:$TENANT_A.$BEN"
+U_CLEO="user:$TENANT_B.$CLEO"
 
 # One tuple per request, so an existing tuple never takes its batch down
 # with it. Prints ok / exists / the error, per tuple.
@@ -133,25 +138,30 @@ echo "  group id format: $FMT  e.g. $DD_A"
 
 echo "  tenants and their members"
 write '[
-  {"user":"user:'"$ADA"'",  "relation":"member","object":"tenant:'"$TENANT_A"'"},
-  {"user":"user:'"$BEN"'",  "relation":"member","object":"tenant:'"$TENANT_A"'"},
-  {"user":"user:'"$CLEO"'", "relation":"member","object":"tenant:'"$TENANT_B"'"}
+  {"user":"'"$U_ADA"'",  "relation":"member","object":"tenant:'"$TENANT_A"'"},
+  {"user":"'"$U_BEN"'",  "relation":"member","object":"tenant:'"$TENANT_A"'"},
+  {"user":"'"$U_CLEO"'", "relation":"member","object":"tenant:'"$TENANT_B"'"}
+]'
+
+echo "  tenant administrators: the admin relation on the tenant object"
+write '[
+  {"user":"'"$U_ADA"'",  "relation":"admin","object":"tenant:'"$TENANT_A"'"},
+  {"user":"'"$U_CLEO"'", "relation":"admin","object":"tenant:'"$TENANT_B"'"}
 ]'
 
 echo "  role groups (exist ONLY in OpenFGA)"
 write '[
-  {"user":"user:'"$ADA"'",  "relation":"member","object":"'"$DD_A"'"},
-  {"user":"user:'"$BEN"'",  "relation":"member","object":"'"$CD_A"'"},
-  {"user":"user:'"$ADA"'",  "relation":"member","object":"'"$TA_A"'"},
-  {"user":"user:'"$CLEO"'", "relation":"member","object":"'"$DD_B"'"}
+  {"user":"'"$U_ADA"'",  "relation":"member","object":"'"$DD_A"'"},
+  {"user":"'"$U_BEN"'",  "relation":"member","object":"'"$CD_A"'"},
+  {"user":"'"$U_CLEO"'", "relation":"member","object":"'"$DD_B"'"}
 ]'
 
-echo "  nested membership: every tenant administrator is also a dashboard designer"
+echo "  nested membership: chart designers are also dashboard designers (a group as a member of a group)"
 write '[
-  {"user":"'"$TA_A"'#member","relation":"member","object":"'"$DD_A"'"}
+  {"user":"'"$CD_A"'#member","relation":"member","object":"'"$DD_A"'"}
 ]'
 
 echo
 echo "  seeded identities:"
-echo "    tenant A $TENANT_A  -> Ada (dashboard_designer, tenant_administrator), Ben (chart_designer)"
-echo "    tenant B $TENANT_B  -> Cleo (dashboard_designer)"
+echo "    tenant A $TENANT_A  -> Ada (dashboard_designer, tenant admin), Ben (chart_designer, nested into dashboard_designer)"
+echo "    tenant B $TENANT_B  -> Cleo (dashboard_designer, tenant admin)"

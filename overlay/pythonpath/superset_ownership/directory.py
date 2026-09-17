@@ -657,8 +657,14 @@ class OpenFGADirectory:
         return {"items": items, "next_cursor": None}
 
     def user_in_group(self, member_guid: str, group_id: str) -> bool:
-        obj = group_id if group_id.startswith("group:") else f"group:{group_id}"
-        return _strict_check(_map_ref(f"user:{member_guid}"), "member", obj)
+        # A userset reference: `group:<id>` (its members), or any
+        # `<object>#<relation>` -- `tenant:<t>#admin` is how a tenant's
+        # administrators are asked about.
+        from superset_ownership.identity import split_userset
+
+        ref = group_id if ":" in group_id else f"group:{group_id}"
+        obj, relation = split_userset(ref)
+        return _strict_check(_map_ref(f"user:{member_guid}"), relation, obj)
 
     def group_exists(self, group_id: str) -> bool:
         from superset_ownership import fga
@@ -741,16 +747,38 @@ class OpenFGADirectory:
         `_walk_groups`'s docstring above.
         """
         from superset_ownership.identity import (
+            split_userset,
             tenant_administrator_group,
             user_for_member_guid,
         )
 
-        group = tenant_administrator_group(tenant)
+        obj, relation = split_userset(tenant_administrator_group(tenant))
         guids: list[str] = []
-        for raw_guid in tenant_members(tenant, strict=True):
-            guid = _unmap_member_guid(raw_guid)
-            if _strict_check(_map_ref(f"user:{guid}"), "member", group):
-                guids.append(guid)
+        if obj.startswith("group:"):
+            # The group convention: tenant members crossed with membership.
+            for raw_guid in tenant_members(tenant, strict=True):
+                guid = _unmap_member_guid(raw_guid)
+                if _strict_check(_map_ref(f"user:{guid}"), "member", obj):
+                    guids.append(guid)
+        else:
+            # Neurons' shape: the `admin` tuples on the tenant object -- users
+            # directly, and every member of a group named as admin.
+            from superset_ownership import fga
+
+            for t in fga.read_all(obj, relation, strict=True):
+                subject = _unmap_ref(t["user"])
+                if subject.startswith("user:"):
+                    guids.append(subject.split(":", 1)[1])
+                elif subject.startswith("group:"):
+                    group_id = subject.split(":", 1)[1].split("#", 1)[0]
+                    page = self.group_members(group_id)
+                    guids.extend(m["guid"] for m in page["items"])
+                    cursor = page.get("next_cursor")
+                    while cursor:
+                        page = self.group_members(group_id, cursor=cursor)
+                        guids.extend(m["guid"] for m in page["items"])
+                        cursor = page.get("next_cursor")
+            guids = list(dict.fromkeys(guids))
         labels = _user_labels(guids)
         out: list[UserRef] = []
         for g in guids:
@@ -1056,13 +1084,17 @@ class LocalDirectory:
         from superset import security_manager as sm
 
         from superset_ownership.identity import (
+            member_guid_of_subject_id,
             resolve_member_guid,
             resolve_tenant_guid,
         )
 
+        # The id may be asked for bare (`<member>`) or in the store's
+        # spelling (`<tenant>.<member>`); the member half decides.
+        wanted = member_guid_of_subject_id(member_guid) or member_guid
         return any(
             resolve_tenant_guid(user) == tenant
-            and resolve_member_guid(user) == member_guid
+            and member_guid_of_subject_id(resolve_member_guid(user)) == wanted
             for user in sm.get_all_users()
         )
 
@@ -1076,7 +1108,7 @@ class LocalDirectory:
             group_display_name,
             resolve_member_guid,
             resolve_tenant_guid,
-            TENANT_ROLE_PREFIX,
+            tenant_of_role_name,
         )
 
         found: dict[str, set[str]] = {}
@@ -1086,7 +1118,7 @@ class LocalDirectory:
             guid = resolve_member_guid(user)
             for role in user.roles or []:
                 name = getattr(role, "name", "") or ""
-                if name == f"{TENANT_ROLE_PREFIX}{tenant}":
+                if tenant_of_role_name(name) == tenant:
                     continue
                 if guid and group_belongs_to_tenant(name, tenant):
                     found.setdefault(f"group:{name}", set()).add(guid)
@@ -1138,9 +1170,16 @@ class LocalDirectory:
         return sm.find_role(name) is not None
 
     def tenant_administrators(self, tenant: str) -> list[UserRef]:
-        from superset_ownership.identity import tenant_administrator_group
+        from superset_ownership.identity import (
+            TENANT_ADMINISTRATOR_GROUP,
+            tenant_administrator_group,
+        )
 
         group = tenant_administrator_group(tenant)
+        if group.startswith("tenant:"):
+            # The local convention for the tenant's admin relation: the
+            # `tenant_administrator_<t>` FAB role.
+            group = f"group:{TENANT_ADMINISTRATOR_GROUP}_{tenant}"
         page = self.group_members(group)
         return page["items"]
 

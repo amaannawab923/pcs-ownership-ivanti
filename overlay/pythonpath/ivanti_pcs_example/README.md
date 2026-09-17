@@ -32,16 +32,18 @@ OWNERSHIP_FGA_CREDENTIALS = {"type": "api_token", "token_env": "OPENFGA_TOKEN"}
 # ...or a provider you write, for vaults / rotation / per-environment lookup:
 # OWNERSHIP_FGA_CONFIG_PROVIDER = "ivanti_pcs_example.fga:connection"
 
-# Who is who. Defaults assume the member GUID lands on the Superset
-# username and the tenant on a `tenant_<guid>` FAB role. Override only if
-# your JIT login puts the member id elsewhere:
+# Who is who. Defaults are Neurons' shapes as Ivanti confirmed them: the
+# member GUID is the Superset username (the token's `sub`), the tenant
+# GUID is the `Tenant_<guid>_Role` FAB role (the `tid`), and the store
+# spells a person `user:<tenant-guid>.<member-guid>`. Override only if a
+# deployment puts the ids elsewhere:
 # OWNERSHIP_IDENTITY = "ivanti_pcs_example.identity:AttributeIdentity"
 
 # The directory: users, groups, members, administrators of a tenant.
 OWNERSHIP_DIRECTORY = "openfga"                     # default: read from the store
 # OWNERSHIP_DIRECTORY = "ivanti_pcs_example.directory:FixedGroupsDirectory"
 
-OWNERSHIP_GROUP_ID_FORMAT = "{name}_{tenant}"       # or "{tenant}_{name}"
+OWNERSHIP_GROUP_ID_FORMAT = "{tenant}.{name}"       # Neurons: group:<tenant-guid>.<local-id>
 OWNERSHIP_MANAGE_PERMISSION = None                  # optional sharing-manager role
 # OWNERSHIP_MANAGE_PERMISSION = "sharing_manager_{tenant}"  # or one role per tenant
 OWNERSHIP_OUTBOX_ENABLED = True
@@ -79,21 +81,21 @@ changes anything.
 
 | setting | signature | default behaviour |
 |---|---|---|
-| `OWNERSHIP_MEMBER_GUID` | `(user) -> str \| None` | `user.username` if it is a GUID, else the first GUID in `user.email`, else `local-<id>` |
-| `OWNERSHIP_TENANT_GUID` | `(user) -> str \| None` | GUID of the first `tenant_<guid>` role |
+| `OWNERSHIP_MEMBER_GUID` | `(user) -> str \| None` | the store id `<tenant>.<member>`: `user.username` if it is a GUID (Neurons' `sub`), else the member GUID in `user.email` (`<tenant>_<member>__<email>`), else `local-<id>`; the tenant half from `OWNERSHIP_TENANT_GUID` |
+| `OWNERSHIP_TENANT_GUID` | `(user) -> str \| None` | GUID of the first `Tenant_<guid>_Role` (or `tenant_<guid>`) role |
 | `OWNERSHIP_DISPLAY_NAME` | `(user) -> str` | `first_name last_name`, else username |
-| `OWNERSHIP_IS_TENANT_ADMINISTRATOR` | `(user) -> bool` | `user_in_group(member_guid, "tenant_administrator_<tenant>")` through the Directory seam |
+| `OWNERSHIP_IS_TENANT_ADMINISTRATOR` | `(user) -> bool` | `user_in_group(member_guid, "tenant:<tenant>#admin")` through the Directory seam: the `admin` relation on the tenant object (Neurons' shape) |
 | `OWNERSHIP_USER_FOR_MEMBER_GUID` | `(guid) -> user \| None` | `find_user(username=guid)` then by email |
 | `OWNERSHIP_USERS_OF_TENANT` | `(tenant, query, limit, cursor) -> Page[UserRef]` | `tenant:<t>#member` tuples labelled from `ab_user` |
 | `OWNERSHIP_GROUPS_OF_TENANT` | `(tenant, query, limit, cursor) -> Page[GroupRef]` | `group.tenant` tuples (fast path) or the walk |
 | `OWNERSHIP_MEMBERS_OF_GROUP` | `(group_id, limit, cursor) -> Page[UserRef]` | `group:<id>#member` tuples, nested groups expanded |
-| `OWNERSHIP_USER_IN_GROUP` | `(member_guid, group_id) -> bool` | one `check` |
+| `OWNERSHIP_USER_IN_GROUP` | `(member_guid, group_id) -> bool` | one `check`; `member_guid` is the store id (`<tenant>.<member>`), `group_id` a group id (`<tenant>.<name>`) or the userset `tenant:<t>#admin` (the tenant-administrator question) -- take it apart with `identity.split_userset` |
 | `OWNERSHIP_GROUP_EXISTS` | `(group_id) -> bool` | the group has a tenant tuple or at least one member |
-| `OWNERSHIP_ADMINISTRATORS_OF_TENANT` | `(tenant) -> list[UserRef]` | members of `group:tenant_administrator_<tenant>` |
+| `OWNERSHIP_ADMINISTRATORS_OF_TENANT` | `(tenant) -> list[UserRef]` | holders of `admin` on `tenant:<tenant>` (users directly, and every member of a group named as admin) |
 | `OWNERSHIP_GROUP_ID` | `(name, tenant) -> str` | `OWNERSHIP_GROUP_ID_FORMAT` rendered |
 | `OWNERSHIP_SPLIT_GROUP_ID` | `(group_id) -> (name, tenant) \| None` | the format parsed back |
 | `OWNERSHIP_GROUP_DISPLAY_NAME` | `(group_id) -> str` | the `name` part with `_` -> space |
-| `OWNERSHIP_TENANT_ADMINISTRATOR_GROUP` | `(tenant) -> str` | the OBJECT reference `group:tenant_administrator_<tenant>` (not the bare name -- this is what `user_in_group` receives) |
+| `OWNERSHIP_TENANT_ADMINISTRATOR_GROUP` | `(tenant) -> str` | the userset reference the administrators hold, `tenant:<tenant>#admin` by default (Neurons' shape); a hook may name a group instead, `group:<id>` -- this is what `user_in_group` receives |
 | `OWNERSHIP_CAN_MANAGE` | `(user, object_state) -> reason \| None` | admin > owner > tenant administrator > manage permission |
 
 Five rules apply to every hook (the contract's §4.5.1 has the full text):
@@ -118,7 +120,10 @@ Five rules apply to every hook (the contract's §4.5.1 has the full text):
    `OWNERSHIP_LOOKUP_CACHE_TTL` seconds, keyed by user id --
    `OWNERSHIP_DISPLAY_NAME` and `OWNERSHIP_USER_FOR_MEMBER_GUID` are NOT
    cached. A directory hook (`_OF_TENANT`/`_OF_GROUP`) is cached for
-   `OWNERSHIP_DIRECTORY_GROUP_WALK_TTL` seconds. Only a RETURNED answer is
+   `OWNERSHIP_DIRECTORY_GROUP_WALK_TTL` seconds (on a Neurons store, which
+   writes no group-to-tenant tuple, set `OWNERSHIP_DIRECTORY_GROUP_WALK =
+   "always"` so `groups_of_tenant` walks without first reading an empty
+   fast path and warning about it). Only a RETURNED answer is
    cached, never a failure -- a one-off raise does not pin "unknown" for the
    rest of the TTL. A hook that calls an external API is therefore called
    at most once per key per TTL, not once per request. **`subject_display_name`
@@ -146,10 +151,10 @@ for access decisions. Keep writing exactly this shape, and keep it current:
 
 | Tuple | Meaning |
 |---|---|
-| `user:<memberGUID> member tenant:<tenantGUID>` | tenant membership (unchanged) |
-| `user:<memberGUID> member group:<groupID>` | group membership (unchanged) |
+| `user:<tenantGUID>.<memberGUID> member tenant:<tenantGUID>` | tenant membership (unchanged; the subject is the store id, tenant GUID, a dot, member GUID) |
+| `user:<tenantGUID>.<memberGUID> member group:<tenantGUID>.<localID>` | group membership (unchanged) |
 | `group:<parentID>#member member group:<childID>` | nested group membership, if you have nested groups |
-| `user:<memberGUID> member group:tenant_administrator_<tenantGUID>` | who administers a tenant, modelled as membership in a specially-named group |
+| `user:<tenantGUID>.<memberGUID> admin tenant:<tenantGUID>` (or `group:<id>#member admin tenant:<tenantGUID>`) | who administers a tenant: the platform's `admin` relation on the tenant object, written by Neurons, never by this module |
 | `tenant:<tenantGUID>#member tenant group:<groupID>` | **new for this PR**: write this when a group is created, even with zero members, so it is enumerable immediately (`OpenFGADirectory.list_groups`'s fast path reads it) |
 
 Events to handle: user joins/leaves a tenant, group created/renamed/deleted,
@@ -157,8 +162,9 @@ membership added/removed, admin granted/revoked. A rename is
 delete-old-id/create-new-id, not an in-place update -- the display name
 lives inside the id.
 
-`OWNERSHIP_GROUP_ID_FORMAT` (`{name}_{tenant}`, our default, or
-`{tenant}_{name}`) is one setting on our side; your sync must write
+`OWNERSHIP_GROUP_ID_FORMAT` (`{tenant}.{name}`, the default and Neurons'
+own shape; `{name}_{tenant}` or `{tenant}_{name}` for a store written
+before the confirmation) is one setting on our side; your sync must write
 whichever one is configured, consistently -- a mismatch is what
 `superset ownership plugin verify`'s `vocabulary/group_ids_parse` check
 catches.
@@ -271,19 +277,19 @@ moment the config block is switched on.
 | hook | the question | the default reads | this file reads instead | Ivanti would likely read |
 |---|---|---|---|---|
 | `member_guid` | which store identity is this account? | a GUID inside the username or email | the `ivanti_pcs_example_member_guid` table (falling back to `DefaultIdentity`'s own computation -- a GUID in the username/email, else `local-<id>` -- when the account has no row, NOT the bare username: `local-<id>` is the documented shape §4.5.2 promises, a raw username is neither a GUID nor that placeholder) | whatever their JIT login already writes to the account -- a claim, an attribute, a linked-identity table of their own |
-| `tenant_guid` | which tenant does this account act in? | the first `tenant_<guid>` FAB role | the new `ivanti_pcs_example_tenant` table (falling back to the same role scan, called on `DefaultIdentity` directly so the fallback itself is not another hook invocation) | a tenant id already carried on the account from JIT provisioning, without needing a role at all |
+| `tenant_guid` | which tenant does this account act in? | the first `Tenant_<guid>_Role` (or `tenant_<guid>`) FAB role | the new `ivanti_pcs_example_tenant` table (falling back to the same role scan, called on `DefaultIdentity` directly so the fallback itself is not another hook invocation) | a tenant id already carried on the account from JIT provisioning, without needing a role at all |
 | `display_name` | what do we call this account in the UI? | `"First Last"` | `"Last, First"` -- deliberately the opposite order, so a screenshot alone proves the hook is live | whatever their own directory's display convention is |
-| `is_tenant_administrator` | does this account administer its tenant? | membership of `tenant_administrator_<tenant>` through the Directory seam | a FAB role of our own naming, `neurons_tenant_admin_<tenant>`, checked first; only when the account holds no such role does it fall through to the store group via the Directory seam ("our source first, store second") | a role or claim their identity system already grants, checked before ever asking the store |
+| `is_tenant_administrator` | does this account administer its tenant? | the `admin` relation on `tenant:<tenant>` (`tenant_administrator_group`'s userset) through the Directory seam | a FAB role of our own naming, `neurons_tenant_admin_<tenant>`, checked first; only when the account holds no such role does it fall through to the store group via the Directory seam ("our source first, store second") | a role or claim their identity system already grants, checked before ever asking the store |
 | `user_for_member_guid` | which Superset account does this GUID name? | `find_user(username=guid)`, then by email | the reverse of `member_guid`'s table (with the forward-mapping check, §4.2), then the same username/email fallback | the reverse lookup on whatever forward source they configured `member_guid` to read |
 | `users_of_tenant` | who can be shared with, in this tenant? | `tenant:<t>#member` tuples, through `OpenFGADirectory` | the identical tuple shape, read through `fga.read_page` directly (one page, capped at 100, per call) | the same store query, or a call into their own user-directory API |
 | `groups_of_tenant` | which groups exist in this tenant? | the `group.tenant` fast path (or the member walk), through `OpenFGADirectory` | the identical `group.tenant` Read shape, direct | the same store query, or their own group-management service |
 | `members_of_group` | who is in this group? | `group:<id>#member` tuples, nested groups expanded | the same relation, one level, direct (no nested-group expansion -- see the docstring) | the same store query, expanded however deep their model nests |
 | `user_in_group` | is this account in this group? | one `check` | the identical `check`, through `fga.check` directly | the same store query |
 | `group_exists` | is this a real group? | a tenant tuple, or at least one member | both relations, read directly, capped at one row each | a group registry of their own, or the same store probe |
-| `administrators_of_tenant` | who administers this tenant? | members of `group:tenant_administrator_<tenant>` | the union of the `neurons_tenant_admin_<tenant>` role holders (the same source `is_tenant_administrator` checks first) and that same store group, read directly | whichever of the two sources their deployment actually grants from -- this file demonstrates that a hook may need to reconcile more than one |
-| `group_id` / `split_group_id` | how is a group id laid out, and taken apart again? | `OWNERSHIP_GROUP_ID_FORMAT` rendered/parsed (default `{name}_{tenant}`) | the identical `{name}_{tenant}` layout, implemented explicitly rather than delegated to the setting's own machinery -- proving the hook, not the format string, is what answers | whatever layout their sync already writes, as long as the pair is exact inverses |
+| `administrators_of_tenant` | who administers this tenant? | holders of `admin` on `tenant:<tenant>`, groups expanded | the union of the `neurons_tenant_admin_<tenant>` role holders (the same source `is_tenant_administrator` checks first) and that same store group, read directly | whichever of the two sources their deployment actually grants from -- this file demonstrates that a hook may need to reconcile more than one |
+| `group_id` / `split_group_id` | how is a group id laid out, and taken apart again? | `OWNERSHIP_GROUP_ID_FORMAT` rendered/parsed (default `{tenant}.{name}`) | the identical `{name}_{tenant}` layout, implemented explicitly rather than delegated to the setting's own machinery -- proving the hook, not the format string, is what answers | whatever layout their sync already writes, as long as the pair is exact inverses |
 | `group_display_name` | what do we call this group in the UI? | the bare name, underscores kept | title-case with spaces (`dashboard_designer` -> `Dashboard Designer`) | their own naming convention |
-| `tenant_administrator_group` | which group's members administer this tenant? | `group:tenant_administrator_<tenant>` | the identical id, built through this file's own `group_id` | usually unchanged, unless their administrator group is named differently |
+| `tenant_administrator_group` | which userset's holders administer this tenant? | `tenant:<tenant>#admin` (Neurons' shape) | `group:tenant_administrator_<tenant>`, built through this file's own `group_id` -- a deployment whose administrators are a group rather than the tenant's `admin` relation | the userset their platform actually grants administrators through |
 | `can_manage` | may this caller manage this object's sharing? | admin > owner > tenant administrator > manage permission | the default reason, unchanged, except one deliberate NARROWING: a `manage_permission` holder may not manage a `"private"`-visibility object (documented in the docstring as an example of narrowing -- a hook may only take grants away, never add one the default did not already give) | a narrower rule specific to their own compliance requirements |
 
 **This is a reference, not a performance target.** `users_of_tenant` and

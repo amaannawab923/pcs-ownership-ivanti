@@ -58,6 +58,7 @@ from __future__ import annotations
 # The standard library, not superset.utils.json: this module is imported by
 # the pure job, where Superset is absent.
 import json  # noqa: TID251
+import re
 import logging
 import os
 import shutil
@@ -165,9 +166,22 @@ class CountingAuthorizer:
         if self.raising:
             raise RuntimeError(f"authorization store failure during {call[0]}")
 
-    def _members(self, group_ref: str) -> set[str]:
+    def _members(self, group_ref: str, _seen: frozenset = frozenset()) -> set[str]:
+        """Every user reference in a userset, nested groups expanded the way
+        OpenFGA resolves `group#member` recursively."""
+        if group_ref.startswith("tenant:"):
+            obj, _, relation = group_ref.partition("#")
+            return self._holders(relation or "member", obj)
         name = group_ref.split(":", 1)[1].split("#", 1)[0]
-        return self.groups.get(name, set())
+        if name in _seen:
+            return set()
+        out: set[str] = set()
+        for member in self.groups.get(name, set()):
+            if member.startswith("group:"):
+                out |= self._members(member, _seen | {name})
+            else:
+                out.add(member)
+        return out
 
     def _holders(self, relation: str, obj: str) -> set[str]:
         """Every user reference that holds `relation` on `obj`, implications
@@ -193,6 +207,12 @@ class CountingAuthorizer:
         if not self.up:
             return False
         return user in self._holders(relation, obj)
+
+    # -- tenant administrators -------------------------------------------------
+
+    def make_tenant_administrator(self, ref: str, tenant: str) -> None:
+        """Neurons' shape: the `admin` relation on the tenant object."""
+        self.tuples.add((ref, "admin", f"tenant:{tenant}"))
 
     def list_objects(
         self, user: str, relation: str, object_type: str, *, strict: bool = False
@@ -353,21 +373,39 @@ class CountingDirectory:
         self._store._record("user_in_tenant", member_guid, tenant)
         if not self._store.up:
             return False
-        return (f"user:{member_guid}", "member", f"tenant:{tenant}") in self._store.tuples
+        return (
+            f"user:{member_guid}",
+            "member",
+            f"tenant:{tenant}",
+        ) in self._store.tuples
 
-    def list_groups(self, tenant: str, *, cursor: Optional[str] = None) -> dict[str, Any]:
+    def list_groups(
+        self, tenant: str, *, cursor: Optional[str] = None
+    ) -> dict[str, Any]:
         self._store._record("list_groups", tenant)
         items = [
-            {"id": f"group:{name}", "display_name": name, "tenant": tenant, "members": len(members)}
+            {
+                "id": f"group:{name}",
+                "display_name": name,
+                "tenant": tenant,
+                "members": len(members),
+            }
             for name, members in sorted(self._store.groups.items())
         ]
         return {"items": items, "next_cursor": None}
 
-    def group_members(self, group_id: str, *, cursor: Optional[str] = None) -> dict[str, Any]:
+    def group_members(
+        self, group_id: str, *, cursor: Optional[str] = None
+    ) -> dict[str, Any]:
         self._store._record("group_members", group_id)
         ref = group_id if group_id.endswith("#member") else f"{group_id}#member"
         items = [
-            {"guid": u.split(":", 1)[1], "display_name": u.split(":", 1)[1], "email": None, "superset_id": None}
+            {
+                "guid": u.split(":", 1)[1],
+                "display_name": u.split(":", 1)[1],
+                "email": None,
+                "superset_id": None,
+            }
             for u in sorted(self._store._members(ref))
             if u.startswith("user:")
         ]
@@ -383,12 +421,14 @@ class CountingDirectory:
 
     def tenant_administrators(self, tenant: str) -> list[dict[str, Any]]:
         self._store._record("tenant_administrators", tenant)
-        from superset_ownership.identity import tenant_administrator_group
-
-        admin_group = tenant_administrator_group(tenant).split(":", 1)[-1]
-        members = self._store.groups.get(admin_group, set())
+        members = self._store._holders("admin", f"tenant:{tenant}")
         return [
-            {"guid": u.split(":", 1)[1], "display_name": u.split(":", 1)[1], "email": None, "superset_id": None}
+            {
+                "guid": u.split(":", 1)[1],
+                "display_name": u.split(":", 1)[1],
+                "email": None,
+                "superset_id": None,
+            }
             for u in sorted(members)
             if u.startswith("user:")
         ]
@@ -687,10 +727,15 @@ class Person:
     id: int
     username: str
     label: str
+    tenant: Optional[str] = None
 
     @property
     def ref(self) -> str:
-        """The authorization-store reference (identity.member_ref)."""
+        """The authorization-store reference (identity.member_ref): Neurons'
+        `user:<tenant>.<member>` for a person in a tenant, the bare member
+        GUID otherwise."""
+        if self.tenant:
+            return f"user:{self.tenant}.{self.username}"
         return f"user:{self.username}"
 
 
@@ -821,7 +866,23 @@ def _add_person(username: str, label: str, roles: tuple[str, ...]) -> Person:
         password=PASSWORD,
     )
     assert user is not None, f"could not create {username}"
-    return Person(user.id, user.username, label)
+    # The tenant a membership role carries -- `tenant_<guid>` or Neurons'
+    # `Tenant_<guid>_Role` -- parsed here rather than through
+    # `superset_ownership.identity`: the flag-off parity script builds the
+    # world with the package deliberately NOT loaded.
+    tenant = next((t for t in (_tenant_of_role(r) for r in roles) if t), None)
+    return Person(user.id, user.username, label, tenant)
+
+
+_ROLE_TENANT_RE = re.compile(
+    r"^tenant_([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:_role)?$",
+    re.IGNORECASE,
+)
+
+
+def _tenant_of_role(name: str) -> Optional[str]:
+    m = _ROLE_TENANT_RE.match(name or "")
+    return m.group(1).lower() if m else None
 
 
 # --------------------------------------------------------------------- the harness

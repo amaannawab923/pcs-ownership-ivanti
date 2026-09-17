@@ -51,6 +51,11 @@ from __future__ import annotations
 # directly, so "openfga" is what the acceptance runbook uses.
 OWNERSHIP_AUTHORIZER = "openfga"
 OWNERSHIP_DIRECTORY = "openfga"
+# Neurons writes no group-to-tenant tuple (the tenant is read from the
+# group id), so the built-in `list_groups` fast path is always empty
+# there: walk the members outright rather than read an empty page and
+# warn about it once per tenant per TTL.
+OWNERSHIP_DIRECTORY_GROUP_WALK = "always"
 
 # -- caller-side: take the Flask-AppBuilder User row -----------------------
 OWNERSHIP_MEMBER_GUID = "ivanti_pcs_example.hooks:member_guid"

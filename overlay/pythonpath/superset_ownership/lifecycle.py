@@ -697,6 +697,60 @@ def group_share_buckets(session: Any = None) -> dict[str, list[str]]:
     }
 
 
+def user_share_buckets(session: Any = None) -> dict[str, list[str]]:
+    """User subjects in the `ownership_share` mirror spelt without the
+    tenant while the account they name sits in one: `user:<member>` rows
+    written before the store id carried the tenant (`user:<tenant>.<member>`).
+
+    `user_id_mismatch`: the check asks the store under the account's
+        current spelling, so such a share grants nothing while the drawer
+        still lists it. The analogue of `group_id_mismatch`, and it fails
+        `check_consistency` the same way. The remedy is to unshare the row
+        (the delete revokes under the row's own spelling) and share again.
+        A `user:<member>` row whose account is in no tenant, or names no
+        account at all, is the store's spelling for that person and is not
+        listed.
+    """
+    from sqlalchemy import select
+
+    from superset_ownership.db import ownership_share
+    from superset_ownership.identity import (
+        resolve_member_guid,
+        split_subject_id,
+        user_for_member_guid,
+    )
+
+    if session is None:
+        from superset import db
+
+        session = db.session
+    subjects = (
+        session.execute(
+            select(ownership_share.c.subject)
+            .where(ownership_share.c.subject.like("user:%"))
+            .distinct()
+        )
+        .scalars()
+        .all()
+    )
+    mismatch: set[str] = set()
+    for subject in subjects:
+        tenant, member = split_subject_id(subject)
+        if tenant or not member:
+            continue
+        try:
+            user = user_for_member_guid(member)
+            current = resolve_member_guid(user) if user is not None else None
+        except Exception:  # noqa: BLE001 - a hook outage is not a mismatch
+            logger.debug(
+                "lifecycle: could not resolve share subject %r", subject, exc_info=True
+            )
+            continue
+        if current and split_subject_id(current)[0]:
+            mismatch.add(subject)
+    return {"user_id_mismatch": sorted(mismatch)}
+
+
 def group_id_mismatches(session: Any = None) -> list[str]:
     """The `group_id_mismatch` bucket of `group_share_buckets`: tenanted
     group subjects the configured format cannot parse."""
@@ -744,6 +798,11 @@ def check_consistency() -> dict[str, Any]:
     for new writes only, is listed in `constraints_unvalidated` and fails
     the check until the next upgrade repairs the rows and validates it.
     Below 0003 all four are reported and nothing is required.
+
+    Also reports `user_id_mismatch` (`user_share_buckets`): user share rows
+    spelt without the tenant while the account sits in one, which grant
+    nothing under the store's current spelling; fails the check, remedy is
+    unshare and share again.
 
     Also reports the two buckets of `group_share_buckets`. `group_id_mismatch`
     (tenanted group subjects the configured group id format cannot parse)
@@ -896,6 +955,10 @@ def check_consistency() -> dict[str, Any]:
             outbox_failed = bool(ob["dead"] or ob["stalled"])
 
     report.update(group_share_buckets(db.session))
+    # One identity lookup per DISTINCT bare-GUID user subject in the mirror
+    # (none on a store written under the current shapes): bounded by the
+    # number of people ever shared with under the old spelling, not by rows.
+    report.update(user_share_buckets(db.session))
     report.update(flags.report())
     report.update(constraint_status(db.session))
     report["plugins"] = _describe_plugins()
@@ -916,6 +979,7 @@ def check_consistency() -> dict[str, Any]:
         or report["orphaned_sentinel"]
         or report["missing_object"]
         or report["group_id_mismatch"]
+        or report["user_id_mismatch"]
         or report["constraints_missing"]
         or report["constraints_unvalidated"]
         or report.get("constraints_error")
@@ -1161,6 +1225,15 @@ def startup_check(repair: bool = False) -> dict[str, Any]:
             len(report["group_id_mismatch"]),
             group_id_format(),
             report["group_id_mismatch"][:20],
+        )
+    if report.get("user_id_mismatch"):
+        logger.error(
+            "superset_ownership: %d user subject(s) in the share mirror are spelt "
+            "without the tenant while the account is in one; those shares grant "
+            "nothing under the store's current spelling. Unshare each and share "
+            "again: %s",
+            len(report["user_id_mismatch"]),
+            report["user_id_mismatch"][:20],
         )
     if not report.get("flags_agree", True):
         # The full diagnosis (which state, what it breaks, what to remove)
@@ -1539,15 +1612,22 @@ def _objects_still_denied() -> list[str]:
 
 
 def teardown(confirm: bool = False) -> dict[str, Any]:
-    """Remove every trace of the feature: sentinels, rows, tables, role.
+    """Remove every trace of the feature: sentinels, rows, tables, the
+    chain's version table, role.
 
-    There is no alembic chain here -- the tables are created by
-    `CREATE TABLE IF NOT EXISTS` at app boot -- so uninstalling had no defined
-    procedure and left both tables and the `__ownership_sentinel__` role
-    behind forever. This is that procedure.
+    The tables are the module's own Alembic chain's (`superset ownership db
+    upgrade`), so the uninstall drops its version table too: with the
+    tables gone and `alembic_version_ownership` still at head, the next
+    `db upgrade` was a no-op and the feature could not be installed again
+    (found on the PCS-10243 manual round after PR #113).
 
     Order matters. `disable()` first, so no object is left carrying a denial
     nothing can interpret; then the rows; then the tables; then the role.
+    The result reports each step (`disable`, `share_rows`, `ownership_rows`,
+    `tables_dropped`, `chain_forgotten`, `role_removed`). "Every trace"
+    holds once the module is out of the configuration: a next boot with
+    it still configured and OWNERSHIP_AUTO_MIGRATE on recreates the empty
+    tables, which is the reinstall this now makes possible.
 
     Requires confirm=True: it is irreversible, and every ownership and share
     record goes with it.
@@ -1589,6 +1669,9 @@ def teardown(confirm: bool = False) -> dict[str, Any]:
 
     metadata.drop_all(bind=db.session.get_bind(), checkfirst=True)
     result["tables_dropped"] = sorted(metadata.tables)
+    from superset_ownership import migrate
+
+    result["chain_forgotten"] = migrate.forget(bind=db.session.get_bind())
 
     # The guard refuses to let anything delete the sentinel role -- see
     # guard._protect_the_sentinel. teardown is the sanctioned exception, and

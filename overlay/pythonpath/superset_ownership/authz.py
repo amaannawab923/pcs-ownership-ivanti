@@ -85,10 +85,14 @@ class Authorizer(Protocol):
         (`LocalAuthorizer`) may ignore the flag.
         """
 
-    def write_tuple(self, user: str, relation: str, obj: str, *, strict: bool = False) -> bool:
+    def write_tuple(
+        self, user: str, relation: str, obj: str, *, strict: bool = False
+    ) -> bool:
         """Grant `relation`. Idempotent."""
 
-    def delete_tuple(self, user: str, relation: str, obj: str, *, strict: bool = False) -> bool:
+    def delete_tuple(
+        self, user: str, relation: str, obj: str, *, strict: bool = False
+    ) -> bool:
         """Revoke `relation`. Idempotent."""
 
     def list_relations(self, user: str, obj: str) -> list[str]:
@@ -132,7 +136,12 @@ class Authorizer(Protocol):
         the write's own outcome carries that (see ``strict``)."""
 
     def set_object_tenant(
-        self, asset_type: str, object_uuid: str, tenant_guid: str, *, strict: bool = False
+        self,
+        asset_type: str,
+        object_uuid: str,
+        tenant_guid: str,
+        *,
+        strict: bool = False,
     ) -> bool:
         """Record an object's tenant. Idempotent."""
 
@@ -165,12 +174,39 @@ class LocalAuthorizer:
         return (asset_type, row.object_id) if row else (asset_type, None)
 
     def check(self, user: str, relation: str, obj: str) -> bool:
+        if obj.startswith("tenant:"):
+            # The tenant object's relations, answered from FAB roles the way
+            # `user_in_group` answers a group's: `admin` is membership of
+            # the `tenant_administrator_<guid>` role, `member` of the
+            # tenant's own role.
+            return self._tenant_relation(user, relation, obj[len("tenant:") :])
         asset_type, object_id = self._resolve(obj)
         if object_id is None:
             return False
         from superset_ownership import service
 
         return service.has_share_row(asset_type, object_id, user, relation)
+
+    def _tenant_relation(self, user: str, relation: str, tenant: str) -> bool:
+        from superset_ownership.identity import (
+            member_guid_of_subject_id,
+            tenant_of_role_name,
+            TENANT_ADMINISTRATOR_GROUP,
+            user_for_member_guid,
+        )
+
+        account = user_for_member_guid(member_guid_of_subject_id(user) or user)
+        if account is None:
+            return False
+        names = [getattr(r, "name", "") or "" for r in (account.roles or [])]
+        if relation == "member":
+            return any(tenant_of_role_name(n) == tenant for n in names)
+        if relation == "admin":
+            return any(
+                n.lower() == f"{TENANT_ADMINISTRATOR_GROUP}_{tenant}".lower()
+                for n in names
+            )
+        return False
 
     def list_objects(
         self, user: str, relation: str, object_type: str, *, strict: bool = False
@@ -213,11 +249,20 @@ class LocalAuthorizer:
     # closes that.
 
     def user_in_group(self, user_guid: str, group: str) -> bool:
-        """Groups are FAB roles on this backend; membership is role membership."""
+        """Groups are FAB roles on this backend; membership is role
+        membership. A tenant userset (`tenant:<t>#admin`, the default
+        administrator reference) is answered from the tenant's roles."""
         from superset import security_manager as sm
 
+        if group.startswith("tenant:"):
+            obj, _, relation = group.partition("#")
+            return self._tenant_relation(
+                f"user:{user_guid}", relation or "member", obj[len("tenant:") :]
+            )
         name = group.split(":", 1)[-1].split("#", 1)[0]
-        user = sm.find_user(username=user_guid)
+        from superset_ownership.identity import member_guid_of_subject_id
+
+        user = sm.find_user(username=member_guid_of_subject_id(user_guid) or user_guid)
         if user is None:
             return False
         return any(getattr(r, "name", None) == name for r in (user.roles or []))
@@ -275,7 +320,12 @@ class LocalAuthorizer:
         return [row.object_uuid for row in rows if row.owner_user_id in in_tenant]
 
     def set_object_tenant(
-        self, asset_type: str, object_uuid: str, tenant_guid: str, *, strict: bool = False
+        self,
+        asset_type: str,
+        object_uuid: str,
+        tenant_guid: str,
+        *,
+        strict: bool = False,
     ) -> bool:
         """Nothing to write: the owner's tenant IS the object's tenant here."""
         return True
@@ -300,7 +350,9 @@ class LocalAuthorizer:
     # connection would deadlock. The Protocol has no session parameter for
     # the same reason.
 
-    def write_tuple(self, user: str, relation: str, obj: str, *, strict: bool = False) -> bool:
+    def write_tuple(
+        self, user: str, relation: str, obj: str, *, strict: bool = False
+    ) -> bool:
         asset_type, object_id = self._resolve(obj)
         if object_id is None:
             # The object resolved when this was asked for (the routes resolve
@@ -308,14 +360,18 @@ class LocalAuthorizer:
             # nothing to grant on, and nothing a retry could change; a queued
             # write for a deleted object must not park dead and block that
             # object's purge behind it.
-            logger.info("local authorizer: %s no longer resolves; nothing to write", obj)
+            logger.info(
+                "local authorizer: %s no longer resolves; nothing to write", obj
+            )
             return True
         from superset_ownership import service
 
         service.add_share_row(asset_type, object_id, user, relation)
         return True
 
-    def delete_tuple(self, user: str, relation: str, obj: str, *, strict: bool = False) -> bool:
+    def delete_tuple(
+        self, user: str, relation: str, obj: str, *, strict: bool = False
+    ) -> bool:
         asset_type, object_id = self._resolve(obj)
         if object_id is None:
             return True  # nothing to revoke on an object that is gone
@@ -435,14 +491,18 @@ class OpenFGAAuthorizer:
             )
         ]
 
-    def write_tuple(self, user: str, relation: str, obj: str, *, strict: bool = False) -> bool:
+    def write_tuple(
+        self, user: str, relation: str, obj: str, *, strict: bool = False
+    ) -> bool:
         from superset_ownership import fga
 
         return fga.write_tuple(
             self._subject_ref(user), relation, self._object_ref(obj), strict=strict
         )
 
-    def delete_tuple(self, user: str, relation: str, obj: str, *, strict: bool = False) -> bool:
+    def delete_tuple(
+        self, user: str, relation: str, obj: str, *, strict: bool = False
+    ) -> bool:
         from superset_ownership import fga
 
         return fga.delete_tuple(
@@ -472,7 +532,8 @@ class OpenFGAAuthorizer:
 
         ref, subject = self._object_ref(obj), self._subject_ref(user)
         mine = [
-            t for t in fga.read_all(ref, strict=True)
+            t
+            for t in fga.read_all(ref, strict=True)
             if t.get("user") == subject and t.get("relation") not in ("owner", "tenant")
         ]
         if not mine:
@@ -506,16 +567,23 @@ class OpenFGAAuthorizer:
     # group listing and group existence moved to `OpenFGADirectory`.
 
     def user_in_group(self, user_guid: str, group: str) -> bool:
+        """Membership of a userset: `group:<id>` (its members), or any
+        `<object>#<relation>` -- `tenant:<t>#admin` is how a tenant's
+        administrators are asked about (Neurons' shape)."""
         from superset_ownership import fga
+        from superset_ownership.identity import split_userset
 
-        return fga.check(self._subject_ref(f"user:{user_guid}"), "member", group)
+        obj, relation = split_userset(group)
+        return fga.check(self._subject_ref(f"user:{user_guid}"), relation, obj)
 
     def object_tenant(
         self, asset_type: str, object_uuid: str, *, strict: bool = False
     ) -> str | None:
         from superset_ownership import fga
 
-        mapped_type, _, mapped_uuid = self._object_ref(f"{asset_type}:{object_uuid}").partition(":")
+        mapped_type, _, mapped_uuid = self._object_ref(
+            f"{asset_type}:{object_uuid}"
+        ).partition(":")
         return fga.object_tenant(mapped_type, mapped_uuid, strict=strict)
 
     def tenant_objects(self, tenant_guid: str, asset_type: str) -> list[str]:
@@ -534,12 +602,21 @@ class OpenFGAAuthorizer:
         return fga.tenant_objects(tenant_guid, asset_type)
 
     def set_object_tenant(
-        self, asset_type: str, object_uuid: str, tenant_guid: str, *, strict: bool = False
+        self,
+        asset_type: str,
+        object_uuid: str,
+        tenant_guid: str,
+        *,
+        strict: bool = False,
     ) -> bool:
         from superset_ownership import fga
 
-        mapped_type, _, mapped_uuid = self._object_ref(f"{asset_type}:{object_uuid}").partition(":")
-        return fga.set_object_tenant(mapped_type, mapped_uuid, tenant_guid, strict=strict)
+        mapped_type, _, mapped_uuid = self._object_ref(
+            f"{asset_type}:{object_uuid}"
+        ).partition(":")
+        return fga.set_object_tenant(
+            mapped_type, mapped_uuid, tenant_guid, strict=strict
+        )
 
 
 # The one alias table for OWNERSHIP_AUTHORIZER, resolved by

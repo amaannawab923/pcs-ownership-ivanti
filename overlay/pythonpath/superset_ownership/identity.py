@@ -110,11 +110,72 @@ GUID_RE = re.compile(
 # "upserts a per-tenant RLS rule bound to the tenant role", so the tenant role
 # is where tenancy already lives; we read the GUID back out of its name.
 TENANT_ROLE_PREFIX = "tenant_"
+# The membership role's two accepted shapes, case-insensitively: Neurons'
+# `Tenant_<guid>_Role` (the JIT-provisioned role Ivanti's `tid` claim lands
+# on), and the bare `tenant_<guid>` this module used before that was known
+# (what the local seeds and the local backend still create). Nothing else
+# with "tenant" in its name counts -- `tenant_administrator_<guid>` never
+# made anyone a member.
+TENANT_ROLE_SUFFIX = "_role"
 
 
-def tenant_role(tenant_guid: str) -> str:
-    """The FAB role name that makes an account a member of the tenant."""
-    return f"{TENANT_ROLE_PREFIX}{tenant_guid}"
+def tenant_of_role_name(name: Optional[str]) -> Optional[str]:
+    """The tenant GUID a membership role name carries, or None for any other
+    role. Exactly `tenant_<guid>` or `tenant_<guid>_role`, case-insensitive."""
+    lowered = (name or "").lower()
+    if not lowered.startswith(TENANT_ROLE_PREFIX):
+        return None
+    guid = _first_guid(lowered)
+    if not guid:
+        return None
+    if lowered in (
+        f"{TENANT_ROLE_PREFIX}{guid}",
+        f"{TENANT_ROLE_PREFIX}{guid}{TENANT_ROLE_SUFFIX}",
+    ):
+        return guid
+    return None
+
+
+def tenant_role_name(tenant: str) -> str:
+    """The membership role name this module CREATES for a tenant (the local
+    backend's seeds, the demo world): Neurons' shape."""
+    return f"Tenant_{tenant}_Role"
+
+
+# --- the OpenFGA user subject ---------------------------------------------
+#
+# Neurons spells a person in the store as `user:<tenant-guid>.<member-guid>`:
+# the tenant first, then a dot, then the member. `subject_id` builds that
+# id for a Superset user (the bare member GUID when the user has no tenant,
+# so a standalone instance keeps working), and `member_guid_of_subject_id`
+# takes it apart again; nothing else in the module parses a user subject.
+SUBJECT_SEPARATOR = "."
+
+
+def compose_subject_id(tenant: Optional[str], member: Optional[str]) -> Optional[str]:
+    if not member:
+        return None
+    return f"{tenant}{SUBJECT_SEPARATOR}{member}" if tenant else member
+
+
+def split_subject_id(subject_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """`(tenant, member)` for a store user id: `<tenant>.<member>`, or a
+    bare member id (no tenant). A `local-<id>` fallback has no tenant."""
+    if not subject_id:
+        return None, None
+    ref = subject_id.split("#", 1)[0]
+    if ref.startswith("user:"):
+        ref = ref[len("user:") :]
+    # Only a GUID-shaped head is a tenant: an email (`a@b.c`), a `local-<id>`
+    # fallback or a bare member GUID has none, dots or not.
+    head, sep, tail = ref.partition(SUBJECT_SEPARATOR)
+    if sep and tail and GUID_RE.fullmatch(head):
+        return head.lower(), tail
+    return None, ref
+
+
+def member_guid_of_subject_id(subject_id: Optional[str]) -> Optional[str]:
+    return split_subject_id(subject_id)[1]
 
 
 # --- group ids ---------------------------------------------------------------
@@ -128,9 +189,12 @@ def tenant_role(tenant_guid: str) -> str:
 # and every place that builds or takes apart a group id goes through the
 # helpers below; nothing else may concatenate a name and a tenant.
 #
-#   "{name}_{tenant}"   the pre-configuration shape (the default):
+#   "{tenant}.{name}"   Neurons' shape (the default): the tenant GUID, a
+#                        dot, then the group's local id --
+#                        <guid>.dashboard_designer
+#   "{name}_{tenant}"   the pre-configuration shape:
 #                        dashboard_designer_<guid>
-#   "{tenant}_{name}"   the SOW's shape:
+#   "{tenant}_{name}"   the SOW text's shape:
 #                        <guid>_dashboard_designer
 #
 # Both halves are constrained so that `group_id` and `split_group_id` are a
@@ -139,11 +203,15 @@ def tenant_role(tenant_guid: str) -> str:
 # not contain whitespace, `:` or `#` (OpenFGA refuses such object ids, and
 # `#` and `:` are the reference delimiters the parser strips).
 #
-# TO CONFIRM WITH IVANTI: which one does the directory hook write?
+# Confirmed by Ivanti: Neurons writes `group:<tenant-guid>.<group-local-id>`,
+# nests groups as-is (`group:<t>.child#member` member of `group:<t>.parent`),
+# and writes no separate group-to-tenant tuple -- the tenant is read from
+# the id.
 GROUP_ID_FORMAT_SETTING = "OWNERSHIP_GROUP_ID_FORMAT"
+GROUP_ID_FORMAT_NEURONS = "{tenant}.{name}"
 GROUP_ID_FORMAT_SUFFIX = "{name}_{tenant}"
 GROUP_ID_FORMAT_PREFIX = "{tenant}_{name}"
-GROUP_ID_FORMAT_DEFAULT = GROUP_ID_FORMAT_SUFFIX
+GROUP_ID_FORMAT_DEFAULT = GROUP_ID_FORMAT_NEURONS
 
 # The group whose members administer a tenant, before the tenant is applied.
 TENANT_ADMINISTRATOR_GROUP = "tenant_administrator"
@@ -437,10 +505,30 @@ def _default_group_display_name(group_id_or_ref: str) -> str:
     return _bare_group_id(group_id_or_ref) or group_id_or_ref
 
 
+TENANT_ADMINISTRATOR_RELATION = "admin"
+
+
+def split_userset(ref: str) -> tuple[str, str]:
+    """`(object, relation)` of a userset reference: `tenant:<t>#admin` is
+    `("tenant:<t>", "admin")`; a bare `group:<id>` (or `group:<id>#member`)
+    is `("group:<id>", "member")`."""
+    obj, _, relation = ref.partition("#")
+    return obj, relation or "member"
+
+
 def tenant_administrator_group(tenant: str) -> str:
-    """`group:<id>` of the group whose members administer `tenant` (or, when
-    `OWNERSHIP_TENANT_ADMINISTRATOR_GROUP` is set, the configured shape
-    hook's answer, §4.5.2)."""
+    """The userset whose holders administer `tenant` -- what
+    `Directory.user_in_group` is asked about and `tenant_administrators`
+    enumerates.
+
+    Confirmed by Ivanti: a tenant administrator is the `admin` relation
+    directly on the tenant object -- `user:<t>.<m> admin tenant:<t>`, or a
+    `group:<id>#member` as admin -- kept current by their platform from the
+    Neurons Administrator role. So the default is `tenant:<t>#admin`, and
+    this module only ever reads it. `OWNERSHIP_TENANT_ADMINISTRATOR_GROUP`
+    (§4.5.2) may name a group instead (`group:<id>`, its members), the
+    pre-confirmation shape.
+    """
     hook = _get_hook("OWNERSHIP_TENANT_ADMINISTRATOR_GROUP")
     if hook is not None:
         from superset_ownership import plugin_hooks
@@ -455,20 +543,27 @@ def tenant_administrator_group(tenant: str) -> str:
 
 
 def _default_tenant_administrator_group(tenant: str) -> str:
-    return group_object(TENANT_ADMINISTRATOR_GROUP, tenant)
+    return f"tenant:{tenant}#{TENANT_ADMINISTRATOR_RELATION}"
 
 
 def is_structural_tenant_role(name: str) -> bool:
     """Is this name exactly a tenant's membership or administrator role?
 
-    Exactly: the membership role `tenant_<guid>`, or the administrator
-    group's id in the configured OWNERSHIP_GROUP_ID_FORMAT
-    (`tenant_administrator_<guid>` by default), and nothing around either.
-    Either names a POPULATION rather than an entitlement, which is why
-    neither may be the manage-sharing role and neither may be shared to
+    Exactly: the membership role (`Tenant_<guid>_Role` or `tenant_<guid>`),
+    the administrator group's id in the configured OWNERSHIP_GROUP_ID_FORMAT
+    (`<guid>.tenant_administrator` by default) or the local backend's
+    administrator role `tenant_administrator_<guid>`, and nothing around
+    any of them. Each names a POPULATION rather than an entitlement, which
+    is why none may be the manage-sharing role and none may be shared to
     under that permission. Any other name carrying a GUID -- how a
-    directory group is spelled as a role -- is an ordinary role. Case-
-    insensitive, as `resolve_tenant_guid` and `split_group_id` are.
+    directory group is spelled as a role -- is an ordinary role. Under
+    Neurons the administrator population is the `admin` relation on
+    `tenant:<guid>`, which is a userset and never a share subject; a group
+    Ivanti happens to name as an admin (`group:<guid>.administrators`) is
+    an ordinary group here and an ordinary share target for a manage-
+    permission holder -- deliberately, since which groups hold `admin` is
+    theirs to change without this module knowing. Case-insensitive, as
+    `resolve_tenant_guid` and `split_group_id` are.
     """
     if not name:
         return False
@@ -476,10 +571,13 @@ def is_structural_tenant_role(name: str) -> bool:
     guid = _first_guid(bare)
     if not guid:
         return False
-    if bare.lower() == tenant_role(guid):
+    if tenant_of_role_name(bare) == guid:
         return True
     parsed = split_group_id(bare)
-    return parsed is not None and parsed[0].lower() == TENANT_ADMINISTRATOR_GROUP
+    if parsed is not None and parsed[0].lower() == TENANT_ADMINISTRATOR_GROUP:
+        return True
+    # The local backend's administrator role, whatever the group format.
+    return bare.lower() == f"{TENANT_ADMINISTRATOR_GROUP}_{guid}"
 
 
 def _first_guid(text: Optional[str]) -> Optional[str]:
@@ -487,6 +585,23 @@ def _first_guid(text: Optional[str]) -> Optional[str]:
         return None
     m = GUID_RE.search(text)
     return m.group(0).lower() if m else None
+
+
+def _member_guid_of_email(email: Optional[str]) -> Optional[str]:
+    """The member GUID carried by an email, or None.
+
+    Neurons rewrites the address to `<tenant>_<member>__<email>`, so the
+    first GUID in it is the TENANT's; the member's is the one before the
+    `__`. An address carrying a single GUID (a local seed) yields that one.
+    """
+    if not email:
+        return None
+    local, sep, _ = email.partition("__")
+    if sep:
+        guids = GUID_RE.findall(local)
+        if guids:
+            return guids[-1].lower()
+    return _first_guid(email)
 
 
 # --- the Identity protocol ----------------------------------------------------
@@ -543,55 +658,50 @@ class Identity(Protocol):
 
 
 def _default_member_guid(user: Any) -> Optional[str]:
-    """The member GUID for a Superset user.
+    """The store id for a Superset user: `<tenant>.<member>`, or the bare
+    member GUID for an account outside every tenant.
 
-    ASSUMPTION: the GUID is carried on the username, set when Neurons
-    just-in-time provisions the account. Nothing in the SOW states this; it is
-    inferred from users being JIT-provisioned by a system that already knows
-    the member GUID, and username/email being the fields it must populate.
-
-    Falls back to email, then to the integer id prefixed so it is obviously
-    not a GUID -- a local instance with ordinary usernames still works, it
-    just is not speaking Ivanti's identifiers.
-
-    TO CONFIRM WITH IVANTI: is the member GUID the Superset username?
+    Confirmed by Ivanti (PCS-10243): the member GUID is the token's `sub`,
+    which Neurons writes as the Superset username when it just-in-time
+    provisions the account. The email is rewritten to
+    `<tenant>_<member>__<email>`, so the fallback reads the member GUID
+    from the segment between the first `_` and the `__` (the FIRST GUID in
+    that string is the tenant's). An account carrying no GUID at all gets
+    the integer id, prefixed so it is obviously not a GUID -- a local
+    instance with ordinary usernames still works, it just is not speaking
+    Ivanti's identifiers.
     """
     if user is None:
         return None
-    guid = _first_guid(getattr(user, "username", None)) or _first_guid(
+    guid = _first_guid(getattr(user, "username", None)) or _member_guid_of_email(
         getattr(user, "email", None)
     )
-    if guid:
-        return guid
-    return f"local-{user.id}"
+    if not guid:
+        return f"local-{user.id}"
+    # Neurons' store id carries the tenant in front (`<tenant>.<member>`);
+    # a user outside every tenant is the bare member GUID.
+    return compose_subject_id(_default_tenant_guid(user), guid)
 
 
 def _default_tenant_guid(user: Any) -> Optional[str]:
-    """The tenant GUID for a Superset user.
+    """The tenant GUID for a Superset user, read from the tenant role.
 
-    ASSUMPTION: read from the user's tenant-specific role. This one is well
-    supported -- asked directly how Superset absorbs tenant information, the
-    answer was "It is through RLS, and we have tenant-specific roles", and
-    Ivanti's own RLS rule is described as "bound to the tenant role".
-
-    Their `{{ device_scope_filter() }}` macro must already do exactly this
-    resolution at query-build time. If they share it, replace the body of this
-    function with whatever it does and the guess disappears.
-
-    TO CONFIRM WITH IVANTI: can we see device_scope_filter()?
+    Confirmed by Ivanti (PCS-10243): the token's `tid` is carried as the FAB
+    role `Tenant_<guid>_Role`, the same role their RLS rule is bound to.
+    The pre-confirmation spelling `tenant_<guid>` is still accepted so a
+    store seeded before the confirmation keeps working.
     """
     if user is None:
         return None
     for role in getattr(user, "roles", []) or []:
-        name = getattr(role, "name", "") or ""
-        # Exactly `tenant_<guid>`. Matching any role with "tenant" in its name
-        # also matched `tenant_administrator_<guid>`, so granting someone the
-        # administrator role on the local backend silently made them a member
-        # of that tenant -- two orthogonal facts riding on one string.
-        if name.lower().startswith(TENANT_ROLE_PREFIX):
-            guid = _first_guid(name)
-            if guid and name.lower() == f"{TENANT_ROLE_PREFIX}{guid}":
-                return guid
+        # Exactly `Tenant_<guid>_Role` or `tenant_<guid>`. Matching any role
+        # with "tenant" in its name also matched `tenant_administrator_
+        # <guid>`, so granting someone the administrator role on the local
+        # backend silently made them a member of that tenant -- two
+        # orthogonal facts riding on one string.
+        guid = tenant_of_role_name(getattr(role, "name", "") or "")
+        if guid:
+            return guid
     return None
 
 
@@ -604,11 +714,27 @@ def _default_display_name(user: Any) -> str:
     return f"{user.first_name or ''} {user.last_name or ''}".strip() or user.username
 
 
+def subject_ids_match(a: Optional[str], b: Optional[str]) -> bool:
+    """Do two subject ids name the same person? Case-insensitive; the member
+    halves must agree, the tenant halves only when both carry one."""
+    return a is not None and b is not None and _guid_matches(a, b)
+
+
 def _guid_matches(computed: Optional[str], expected: str) -> bool:
-    """Case-normalised equality for a GUID pair (N-2). `resolve_member_guid`
-    lower-cases a GUID-shaped value (`_first_guid`); an override need not,
-    so this compares case-insensitively rather than assuming it does."""
-    return computed is not None and computed.lower() == expected.lower()
+    """Case-normalised equality for a subject id pair (N-2). `resolve_member_
+    guid` lower-cases a GUID-shaped value (`_first_guid`); an override need
+    not, so this compares case-insensitively rather than assuming it does.
+    The member halves must agree; the tenant half is compared only when
+    BOTH sides carry one (`user:<member>` from the UI matches the store's
+    `user:<tenant>.<member>` for the same person, another tenant's spelling
+    of that member does not)."""
+    if computed is None:
+        return False
+    c_tenant, c_member = split_subject_id(computed.lower())
+    e_tenant, e_member = split_subject_id(expected.lower())
+    if c_member != e_member:
+        return False
+    return not (c_tenant and e_tenant) or c_tenant == e_tenant
 
 
 def _default_user_for_member_guid(guid: str) -> Any:
@@ -616,14 +742,22 @@ def _default_user_for_member_guid(guid: str) -> Any:
     or email carries this GUID -- the same two fields `_default_member_guid`
     reads from, so the pair round-trips without either needing an override.
     An override that relocates the GUID (an attribute, a JWT claim) has to
-    replace this too; see the module docstring."""
+    replace this too; see the module docstring.
+
+    The store id may carry the tenant in front (`<tenant>.<member>`); the
+    account is found by the member half alone. One Superset account is one
+    member of one tenant (its tenant role), so a store id spelt with a
+    DIFFERENT tenant than the account's is refused by the callers that
+    compare the two halves (`_default_normalize_subject`, `_validate_user_
+    subject`), not here: this function only finds the account."""
     if not guid:
         return None
     from superset import security_manager
 
-    user = security_manager.find_user(username=guid)
+    member = member_guid_of_subject_id(guid) or guid
+    user = security_manager.find_user(username=member)
     if user is None:
-        user = security_manager.find_user(email=guid)
+        user = security_manager.find_user(email=member)
     return user
 
 
@@ -691,10 +825,27 @@ def _default_normalize_subject(self: "DefaultIdentity", subject: str) -> Optiona
     if ref.isdigit():
         user = security_manager.get_user_by_id(int(ref))
     else:
-        user = security_manager.find_user(username=ref)
+        # `user:<tenant>.<member>` (the store's spelling) and `user:<member>`
+        # (what the UI and a script pass) both name the member's account.
+        member = member_guid_of_subject_id(ref) or ref
+        user = security_manager.find_user(username=member)
         if user is None:
-            user = security_manager.find_user(email=ref)
-        if user is not None and type(self) is not DefaultIdentity:
+            user = security_manager.find_user(email=member)
+        if user is not None and type(self) is DefaultIdentity:
+            # The account was found by the member half; a subject spelt
+            # with ANOTHER tenant's GUID in front (`user:<B>.<m>` for a
+            # member of A) names nobody rather than being silently
+            # re-spelt as the caller's tenant (review round 1 of PR #113).
+            # Only the tenant half is compared here: the member half is
+            # whatever username or email the lookup just matched, so it
+            # agrees by construction, and an account named by its email
+            # keeps resolving as before. An account in NO tenant asked for
+            # with a tenant in front names nobody too: no spelling of it
+            # carries a tenant.
+            asked_tenant = split_subject_id(ref)[0]
+            if asked_tenant and asked_tenant != (_default_tenant_guid(user) or ""):
+                user = None
+        elif user is not None:
             # R2-M1: under a configured identity -- a `member_guid` hook
             # (this method is only ever invoked as `self` = the
             # `HookedIdentity` wrapper when one of the pair is set) or a
@@ -703,11 +854,9 @@ def _default_normalize_subject(self: "DefaultIdentity", subject: str) -> Optiona
             # must clear the same forward-mapping check already applied to
             # the reverse hook's candidate below (rule 3, negative
             # direction): an account only resolves here when its own
-            # `member_guid` agrees with what was asked for. Under the plain
-            # `DefaultIdentity` this is a no-op -- `_default_member_guid`
-            # reads the same username/email fields this lookup just used,
-            # so the two always agree -- which is why this branch is
-            # skipped there rather than merely redundant.
+            # `member_guid` agrees with what was asked for -- and, since
+            # the store id carries the tenant, only when the tenant halves
+            # agree too.
             user = _trust_if_forward_matches(self, user, ref)
         if user is None:
             # The picker's own value under an override that relocated the

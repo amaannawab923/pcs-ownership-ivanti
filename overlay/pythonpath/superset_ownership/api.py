@@ -393,6 +393,7 @@ def _validate_user_subject_unguarded(
         normalize_subject,
         resolve_member_guid,
         resolve_tenant_guid,
+        subject_ids_match,
         user_for_member_guid,
     )
 
@@ -431,7 +432,7 @@ def _validate_user_subject_unguarded(
         # the hook found nobody; contract section 5 puts the tenant
         # boundary in OUR code "regardless of which class answered".
         found_guid = resolve_member_guid(target)
-        if found_guid is None or found_guid.lower() != guid.lower():
+        if not subject_ids_match(found_guid, guid):
             target = None
     if target is None:
         return _confirm_tenant_membership(guid, tenant, store)
@@ -636,6 +637,9 @@ def is_tenant_administrator(user) -> bool:
         )
     if not tenant or not guid:
         return False
+    # `tenant:<t>#admin` by default (Neurons' shape: one check of the admin
+    # relation on the tenant object), or a group's membership when the
+    # shape hook names one.
     return get_directory().user_in_group(guid, tenant_administrator_group(tenant))
 
 
@@ -2190,16 +2194,19 @@ def _self_grant_under_manage_permission(
     """Is this a share or owner write naming the CALLER, admitted only by the
     manage-sharing permission?
 
-    Compared on the canonical store reference, which is what `subject` has
-    been normalised to by the time this is asked; a caller with no member
-    reference at all cannot be named by any subject.
+    Compared by person (`subject_ids_match`: the member half, and the tenant
+    half when both carry one), not by string -- the unshare route may hand
+    this a mirror row's own older spelling of the caller; a caller with no
+    member reference at all cannot be named by any subject.
     """
     if admitted_by != MANAGE_REASON_MANAGE_PERMISSION:
         return False
-    from superset_ownership.identity import member_ref
+    from superset_ownership.identity import member_ref, subject_ids_match
 
     own = member_ref(user.id)
-    return own is not None and subject == own
+    if own is None or not subject.startswith("user:"):
+        return False
+    return subject == own or subject_ids_match(subject, own)
 
 
 def _structural_group_under_manage_permission(
@@ -2501,14 +2508,34 @@ def _remove_asset_share(asset_type: str, pk: int, subject: str):
         ok, why = _validate_subject(subject, user)
     if not ok:
         return _err(400, why)
-    from superset_ownership.identity import IdentityLookupError, normalize_subject
+    from superset_ownership.identity import (
+        IdentityLookupError,
+        normalize_subject,
+        subject_ids_match,
+    )
 
-    # R-1: same second-call guard as the share route above -- fail closed
-    # on the raw subject rather than let a raise escape.
-    try:
-        subject = normalize_subject(subject) or subject
-    except IdentityLookupError:
-        pass
+    # A share is revoked under the spelling it was GRANTED under. The
+    # mirror row is the store's own string for that grant; re-spelling it
+    # through `normalize_subject` (a `user:<member>` row written before the
+    # store id carried the tenant, now canonical as `user:<tenant>.<member>`)
+    # named a subject with no row and no tuple, so the delete removed
+    # nothing and still answered 202 (review round 1 of PR #113). So the
+    # raw subject's own row wins, BEFORE normalisation -- with both
+    # spellings of one person in the mirror, the one the caller named is
+    # the one removed (round 2); failing that, the canonical spelling, and
+    # failing that a user row for the same person under another spelling.
+    if subject not in mirror_subjects:
+        # R-1: same second-call guard as the share route above -- fail
+        # closed on the raw subject rather than let a raise escape.
+        try:
+            subject = normalize_subject(subject) or subject
+        except IdentityLookupError:
+            pass
+    if subject not in mirror_subjects:
+        for mirrored in sorted(mirror_subjects):
+            if mirrored.startswith("user:") and subject_ids_match(mirrored, subject):
+                subject = mirrored
+                break
     if _self_grant_under_manage_permission(subject, user, admitted_by):
         # The holder's own share is the owner's to change, in either
         # direction: this ground manages third parties' shares.
@@ -2871,9 +2898,11 @@ def _set_asset_owner(asset_type: str, pk: int):
             why = _identity_lookup_failed(exc)
             return _err(400, f"cannot verify the subject: the identity plug-in {why}")
         guid = canonical.split(":", 1)[1] if canonical else None
-        from superset import security_manager
+        from superset_ownership.identity import user_for_member_guid
 
-        candidate = security_manager.find_user(username=guid) if guid else None
+        # The canonical id may carry the tenant in front (`<tenant>.<member>`);
+        # the account is the member's.
+        candidate = user_for_member_guid(guid) if guid else None
         if candidate is None:
             return _err(404, "no Superset account for that member")
         if not getattr(candidate, "is_active", False):

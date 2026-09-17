@@ -59,8 +59,10 @@ with app.app_context():
         db.session.commit()
         return role, table
 
-    tenant_a_role, vgs_table = ds_role(f"tenant_{TENANT_A}", "video_game_sales")
-    tenant_b_role, wb_table = ds_role(f"tenant_{TENANT_B}", "wb_health_population")
+    from superset_ownership.identity import tenant_role_name
+
+    tenant_a_role, vgs_table = ds_role(tenant_role_name(TENANT_A), "video_game_sales")
+    tenant_b_role, wb_table = ds_role(tenant_role_name(TENANT_B), "wb_health_population")
     designer_role, sales_table = ds_role("ds_cleaned_sales_data", "cleaned_sales_data")
     # keep the pre-existing single-dataset roles from the earlier demo too
     ds_role("ds_video_game_sales", "video_game_sales")

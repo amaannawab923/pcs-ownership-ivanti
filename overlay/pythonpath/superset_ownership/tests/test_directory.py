@@ -80,6 +80,9 @@ class FakeStore:
         self.group_members: dict[str, list[str]] = {}
         # tenant -> [user guid, ...]
         self.tenant_members: dict[str, list[str]] = {}
+        # tenant -> [user ref or group#member ref, ...]: the `admin`
+        # relation on the tenant object (Neurons' shape).
+        self.tenant_admins: dict[str, list[str]] = {}
         # (object, relation-or-"") -> [raw tuple dict, ...], for the
         # generic object-scoped reads M5b's test seeds directly
         # (list_grants/list_relations/object_tenant/purge_object/
@@ -148,6 +151,15 @@ class FakeStore:
         if relation == "member" and obj and obj.startswith("tenant:"):
             tenant = obj.split(":", 1)[1].split("#", 1)[0]
             allowed = user in {f"user:{g}" for g in self.tenant_members.get(tenant, [])}
+        elif relation == "admin" and obj and obj.startswith("tenant:"):
+            tenant = obj.split(":", 1)[1].split("#", 1)[0]
+            admins = self.tenant_admins.get(tenant, [])
+            allowed = user in admins or any(
+                a.startswith("group:")
+                and user
+                in self.group_members.get(a.split(":", 1)[1].split("#", 1)[0], [])
+                for a in admins
+            )
         elif relation == "member" and obj and obj.startswith("group:"):
             name = obj.split(":", 1)[1].split("#", 1)[0]
             allowed = user in self.group_members.get(name, [])
@@ -211,6 +223,13 @@ class FakeStore:
             tuples = [
                 {"key": {"user": u, "relation": "member", "object": obj}}
                 for u in self.group_members.get(name, [])
+            ]
+            return _resp(200, {"tuples": tuples, "continuation_token": ""})
+        if relation == "admin" and obj and obj.startswith("tenant:"):
+            tenant = obj.split(":", 1)[1]
+            tuples = [
+                {"key": {"user": u, "relation": "admin", "object": obj}}
+                for u in self.tenant_admins.get(tenant, [])
             ]
             return _resp(200, {"tuples": tuples, "continuation_token": ""})
         if relation == "member" and obj and obj.startswith("tenant:"):
@@ -277,6 +296,23 @@ class FakeStore:
                     return _resp(200, {"authorization_model": m})
             return _resp(404, {"code": "not_found", "message": "no such model"})
         raise AssertionError(f"unexpected URL {url}")
+
+
+@pytest.fixture(autouse=True)
+def _pre_configuration_group_ids(monkeypatch):
+    """This file's fixtures spell group ids in the pre-configuration shape
+    (`<name>_<tenant>`); the format-independent logic under test is the
+    same under Neurons' default (`<tenant>.<name>`), which
+    `test_group_id.py` pins on its own."""
+    from superset_ownership.identity import (
+        GROUP_ID_FORMAT_SETTING,
+        GROUP_ID_FORMAT_SUFFIX,
+    )
+
+    monkeypatch.setenv(GROUP_ID_FORMAT_SETTING, GROUP_ID_FORMAT_SUFFIX)
+    # And the walk mode the tests assume (`auto`): a dev container pointed
+    # at a Neurons store runs with OWNERSHIP_DIRECTORY_GROUP_WALK=always.
+    monkeypatch.delenv("OWNERSHIP_DIRECTORY_GROUP_WALK", raising=False)
 
 
 @pytest.fixture
@@ -439,6 +475,35 @@ def test_a_zero_group_tenant_walks_once_per_ttl(store):
     )  # empty is a real answer, cached as "fast is fine"
 
 
+def test_the_walk_under_the_default_neurons_format(store, monkeypatch):
+    """PR #113 review: the autouse fixture pins the pre-configuration
+    format for this file, so nothing here walked a `{tenant}.{name}` store.
+    Under the default -- a Neurons store, which has no group->tenant tuple
+    -- the fast path is empty, the walk finds the member's groups by the
+    dotted id, keeps only the tenant's own, and drops the foreign one."""
+    from superset_ownership.identity import GROUP_ID_FORMAT_SETTING
+
+    monkeypatch.delenv(GROUP_ID_FORMAT_SETTING, raising=False)
+    subject = f"{TENANT_A}.{ADA}"
+    store.tenant_members[TENANT_A] = [subject]
+    store.group_members[f"{TENANT_A}.eng"] = [f"user:{subject}"]
+    store.group_members[f"{TENANT_A}.eng.eu"] = [f"user:{subject}"]
+    store.group_members[f"{TENANT_B}.eng"] = [f"user:{subject}"]  # a store bug
+    store.group_members["untenanted"] = [f"user:{subject}"]
+    d = OpenFGADirectory()
+
+    page = d.list_groups(TENANT_A)
+
+    assert [g["id"] for g in page["items"]] == [
+        f"group:{TENANT_A}.eng",
+        f"group:{TENANT_A}.eng.eu",
+    ]
+    assert all(g["tenant"] == TENANT_A for g in page["items"])
+    assert d._verdict[TENANT_A][0] is False, "walked; the fast path stays empty"
+    assert d.group_exists(f"group:{TENANT_A}.eng")
+    assert d.user_in_group(subject, f"group:{TENANT_A}.eng")
+
+
 def test_always_mode_never_probes_the_fast_path(store, monkeypatch):
     monkeypatch.setenv("OWNERSHIP_DIRECTORY_GROUP_WALK", "always")
     store.tenant_members[TENANT_A] = [ADA]
@@ -565,14 +630,11 @@ def test_user_in_tenant_true_and_false(store):
 def test_tenant_administrators_parity_with_the_old_backfill_algorithm(
     store, superset_stub
 ):
-    """Same shape as the pre-split `backfill._admins_of_tenant`: tenant
-    members crossed with membership in the tenant's administrator group,
-    active accounts only."""
-    from superset_ownership.identity import tenant_administrator_group
-
-    admin_group = tenant_administrator_group(TENANT_A).split(":", 1)[1]
+    """The tenant's administrators are the `admin` tuples on the tenant
+    object (Neurons' shape), users directly or through a group named as
+    admin; active accounts only."""
     store.tenant_members[TENANT_A] = [ADA, BEN]
-    store.group_members[admin_group] = [f"user:{ADA}"]
+    store.tenant_admins[TENANT_A] = [f"user:{ADA}"]
 
     ada_user = FakeAbUser(11, ADA, "Ada", "Lovelace")
     ada_user.is_active = True
@@ -939,11 +1001,8 @@ def test_search_users_unmaps_the_guid_under_a_prefixed_id_authorizer(
 def test_tenant_administrators_composes_with_a_prefixed_id_authorizer(
     store, superset_stub, prefixed_authorizer
 ):
-    from superset_ownership.identity import tenant_administrator_group
-
-    admin_group = tenant_administrator_group(TENANT_A).split(":", 1)[1]
     store.tenant_members[TENANT_A] = [f"neurons|{ADA}"]
-    store.group_members[admin_group] = [f"user:neurons|{ADA}"]
+    store.tenant_admins[TENANT_A] = [f"user:neurons|{ADA}"]
     ada_user = FakeAbUser(11, ADA, "Ada", "Lovelace")
     ada_user.is_active = True
     superset_stub.security_manager.find_user.side_effect = (
@@ -1241,8 +1300,13 @@ def local_world(superset_stub):
 def test_local_directory_search_users_and_user_in_tenant(local_world):
     d = LocalDirectory()
     page = d.search_users(TENANT_A, "")
-    assert {u["guid"] for u in page["items"]} == {ADA, BEN}
+    # The guid a UserRef carries is the STORE id, Neurons' `<tenant>.<member>`.
+    assert {u["guid"] for u in page["items"]} == {
+        f"{TENANT_A}.{ADA}",
+        f"{TENANT_A}.{BEN}",
+    }
     assert d.user_in_tenant(ADA, TENANT_A) is True
+    assert d.user_in_tenant(f"{TENANT_A}.{ADA}", TENANT_A) is True
     assert d.user_in_tenant(ADA, TENANT_B) is False
     assert d.user_in_tenant("nobody", TENANT_A) is False
 
@@ -1267,7 +1331,8 @@ def test_local_directory_group_exists_and_group_members(local_world):
     assert d.group_exists(f"group:{name}") is True
     assert d.group_exists("group:nonexistent") is False
     members = d.group_members(f"group:{name}")["items"]
-    assert [m["guid"] for m in members] == [ADA]
+    # The guid a UserRef carries is the STORE id, Neurons' `<tenant>.<member>`.
+    assert [m["guid"] for m in members] == [f"{TENANT_A}.{ADA}"]
 
 
 def test_local_directory_user_in_group_delegates_to_the_authorizer(local_world):

@@ -52,10 +52,21 @@ MODEL: dict[str, Any] = {
             "type": "tenant",
             "relations": {
                 "member": {"this": {}},
+                # Confirmed by Ivanti: a tenant administrator is the `admin`
+                # relation on the tenant object, held by users directly or
+                # by a group's members, and kept current by their platform.
+                # This module reads it and never writes it.
+                "admin": {"this": {}},
             },
             "metadata": {
                 "relations": {
                     "member": {"directly_related_user_types": [{"type": "user"}]},
+                    "admin": {
+                        "directly_related_user_types": [
+                            {"type": "user"},
+                            {"type": "group", "relation": "member"},
+                        ]
+                    },
                 },
             },
         },
@@ -177,11 +188,110 @@ MODEL: dict[str, Any] = {
 # type -> the relations `fga show-model --check` requires it to declare.
 REQUIRED: dict[str, list[str]] = {
     "user": [],
-    "tenant": ["member"],
+    "tenant": ["member", "admin"],
     "group": ["member", "tenant"],
     "dashboard": ["owner", "editor", "viewer", "tenant"],
     "chart": ["owner", "editor", "viewer", "tenant"],
 }
+
+
+# The types this module OWNS in a store, and the ones it only REFERENCES.
+# Ivanti publishes the store's authorization model (user, tenant, group and
+# their platform's own types); the dashboard and chart types are ours to
+# add. `merge_into` puts our types into a published model without touching
+# theirs -- the model that results is what `install-model` writes when the
+# store already has one.
+OWNED_TYPES = ("dashboard", "chart")
+REFERENCED_TYPES = ("user", "tenant", "group")
+# The relations our reads and writes rely on in the referenced types; a
+# published model missing one cannot serve this module (`missing_relations`).
+REQUIRED_REFERENCED_RELATIONS = {
+    "tenant": ("member", "admin"),
+    "group": ("member",),
+}
+
+
+def _type_map(model_json: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {t["type"]: t for t in model_json.get("type_definitions", [])}
+
+
+def merge_into(published: dict[str, Any]) -> dict[str, Any]:
+    """`published` with this module's owned types added or replaced, its
+    referenced types added where the published model has none, and -- on a
+    referenced type it does have -- only the relations ours defines that
+    theirs lacks added (`tenant#admin` on a model written before it was
+    there; `group#tenant`, which only the group walk's fast path reads and
+    which is harmless without a tuple). A relation the platform already
+    defines is never rewritten: what it means is theirs, and adding a
+    relation breaks no tuple. An OWNED type (`dashboard`, `chart`) is
+    replaced whole, by design: its relations are this module's, and a
+    relation someone had added to it is dropped. Everything else at the
+    top level of the published model (`conditions`, and any key a later
+    schema adds) is carried through untouched."""
+    ours = _type_map(MODEL)
+    out: list[dict[str, Any]] = []
+    present: set[str] = set()
+    for t in published.get("type_definitions", []):
+        name = t["type"]
+        present.add(name)
+        if name in OWNED_TYPES:
+            out.append(ours[name])
+        elif name in ours:
+            merged = dict(t)
+            theirs_rel = dict(merged.get("relations") or {})
+            theirs_meta = dict((merged.get("metadata") or {}).get("relations") or {})
+            for rel, definition in (ours[name].get("relations") or {}).items():
+                if rel not in theirs_rel:
+                    theirs_rel[rel] = definition
+                    meta = (ours[name].get("metadata") or {}).get("relations", {})
+                    if rel in meta:
+                        theirs_meta[rel] = meta[rel]
+            if theirs_rel:
+                merged["relations"] = theirs_rel
+            if theirs_meta:
+                merged["metadata"] = {
+                    **(merged.get("metadata") or {}),
+                    "relations": theirs_meta,
+                }
+            out.append(merged)
+        else:
+            out.append(t)
+    for name in (*REFERENCED_TYPES, *OWNED_TYPES):
+        if name not in present:
+            out.append(ours[name])
+    merged_model = {
+        k: v
+        for k, v in published.items()
+        if k not in ("schema_version", "type_definitions", "id")
+    }
+    merged_model["schema_version"] = published.get("schema_version", SCHEMA_VERSION)
+    merged_model["type_definitions"] = out
+    return merged_model
+
+
+def missing_relations(model_json: dict[str, Any]) -> list[str]:
+    """`type#relation` pairs this module needs that `model_json` lacks:
+    every relation of our owned types, and the referenced relations above.
+    Empty means the model can serve the module."""
+    have = {
+        (t["type"], r)
+        for t in model_json.get("type_definitions", [])
+        for r in (t.get("relations") or {})
+    }
+    types = {t["type"] for t in model_json.get("type_definitions", [])}
+    missing: list[str] = []
+    for name in OWNED_TYPES:
+        for r in _type_map(MODEL)[name]["relations"]:
+            if (name, r) not in have:
+                missing.append(f"{name}#{r}")
+    for name, rels in REQUIRED_REFERENCED_RELATIONS.items():
+        if name not in types:
+            missing.append(name)
+            continue
+        for r in rels:
+            if (name, r) not in have:
+                missing.append(f"{name}#{r}")
+    return missing
 
 
 def _related_type_signature(

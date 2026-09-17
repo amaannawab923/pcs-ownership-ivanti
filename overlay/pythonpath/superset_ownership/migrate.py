@@ -59,6 +59,7 @@ lock-wait timeout even though it, too, surfaces as ``OperationalError`` --
 that text does not match SQLite's own "database is locked"/"already
 exists" wording ``_looks_like_chain_transition_race`` looks for.
 """
+
 from __future__ import annotations
 
 import logging
@@ -261,6 +262,34 @@ def downgrade(revision: str, database_uri: Optional[str] = None) -> None:
     with constraints._DDL_LOCK:
         command.downgrade(_config(database_uri), revision)
     logger.info("superset_ownership: chain downgraded to %s", revision)
+
+
+def forget(bind=None, database_uri: Optional[str] = None) -> bool:  # type: ignore[no-untyped-def]
+    """Drop the chain's own version table, so the next `upgrade` runs the
+    chain from the start. `lifecycle.teardown` calls this after dropping
+    the module's tables: with the tables gone and the version row still at
+    head, `upgrade` was a no-op and the uninstalled feature could not be
+    installed again. Returns whether there was a table to drop. `bind` (an
+    Engine, or a Connection whose transaction the caller owns) wins over
+    `database_uri`."""
+    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy.engine import Connection
+
+    engine = bind
+    if engine is None:
+        engine = create_engine(database_uri or _superset_uri())
+    if not inspect(engine).has_table(VERSION_TABLE):
+        return False
+    statement = text(f"DROP TABLE IF EXISTS {VERSION_TABLE}")
+    if isinstance(engine, Connection):
+        # Inside the caller's transaction (SQLAlchemy 2 autobegins; a
+        # nested `begin()` would raise): they commit.
+        engine.execute(statement)
+    else:
+        with engine.begin() as conn:
+            conn.execute(statement)
+    logger.info("superset_ownership: chain forgotten (%s dropped)", VERSION_TABLE)
+    return True
 
 
 class StampRefusedError(RuntimeError):

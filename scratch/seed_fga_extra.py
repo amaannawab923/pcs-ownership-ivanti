@@ -1,19 +1,27 @@
 # scratch-only addition, NOT part of overlay/qa (overlay/ is generated from
 # client-test main and is never hand-edited -- see scratch/README.md).
 #
-# overlay/qa/seed_directory.py writes each seeded person's tenant membership
-# and their group `member` tuples, but it does not write the group's own
-# `tenant` relation (`tenant:<T>#member tenant group:<id>`) -- the tuple
-# `directory.list_groups(tenant)`/`plugin verify`'s vocabulary/directory
-# checks (group_ids_parse, administrator_group_exists, tenant_isolation) walk
-# to enumerate "this tenant's groups". Without it every group seed_directory.py
-# created is invisible to those checks (SKIP/WARN instead of PASS) even
-# though membership itself works. This script is purely additive: it writes
-# the missing `tenant` relation for every group short-name seed_directory.py
-# used, plus the `tenant_administrator_<tenant>` group (Ada admins tenant A,
-# Cleo admins tenant B) and the nested membership every tenant administrator
-# is also a dashboard_designer (mirrors docker/seed.sh's own pattern for the
-# 2-tenant demo store, extended to the full directory here).
+# Writes what a Neurons deployment's own platform writes and the overlay
+# seeds do not, in Neurons' shapes (PCS-10243, confirmed by Ivanti):
+#
+#   - the three identity members' tenant membership
+#     (`user:<tenant>.<member> member tenant:<tenant>`): overlay/qa/
+#     seed_identity.py creates them as Superset users with `Tenant_<guid>_
+#     Role` but writes nothing to the store, and seed_directory.py leaves
+#     them alone on purpose;
+#   - each tenant's administrator as the platform's `admin` relation on
+#     the tenant object (`user:<tenant>.<admin> admin tenant:<tenant>`),
+#     which the module reads (`tenant_administrator_group` -> `tenant:<t>#
+#     admin`) and never writes -- Ada administers tenant A, Cleo tenant B;
+#   - one nested group per tenant: `group:<t>.chart_designer#member` is a
+#     member of `group:<t>.dashboard_designer` (a group as a member of a
+#     group, resolved by the store).
+#
+# Deliberately NOT written: any group->tenant tuple. Neurons carries the
+# tenant in the group id (`group:<tenant>.<local id>`) and writes no such
+# tuple; the directory walks the members instead
+# (OWNERSHIP_DIRECTORY_GROUP_WALK="always", set in the config layer), and
+# `plugin verify`'s group_has_tenant_tuple reports that as PASS.
 #
 # Idempotent: fga.write_tuple treats an already-existing tuple as success.
 #
@@ -29,64 +37,41 @@ ADA = "3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31"
 BEN = "6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53"
 CLEO = "9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76"
 
-# seed_identity.py creates these three as Superset users with tenant roles
-# but writes nothing to the store, and seed_directory.py leaves them alone
-# on purpose -- so their tenant membership tuples are written HERE. Without
-# them the OpenFGA directory (the sharing picker, users_of_tenant) cannot
-# see them even though every access check for them works.
 IDENTITY_MEMBERS = {ADA: TENANT_A, BEN: TENANT_A, CLEO: TENANT_B}
 
-# Every group short-name seed_directory.py (plus seed_identity.py's tenant
-# roles) referenced, per tenant -- must match those two files exactly.
-GROUPS = {
-    TENANT_A: [
-        "dashboard_designer", "data_analyst", "chart_designer",
-        "marketing_analytics", "finance_reporting", "engineering_metrics",
-        "support_ops", "executives",
-    ],
-    TENANT_B: [
-        "dashboard_designer", "data_analyst", "sales_ops", "chart_designer",
-        "executives", "support_ops", "finance_reporting",
-    ],
-}
-
 # One administrator per tenant -- Ada already tenant A's admin per the
-# delivery brief; Cleo takes tenant B for symmetry (an
-# administrator_group_exists check with zero admins on B would only WARN,
-# not FAIL, but a real multi-tenant demo should have both).
+# delivery brief; Cleo takes tenant B for symmetry (a tenant with no
+# administrator has nobody to inherit its unowned objects).
 TENANT_ADMINS = {TENANT_A: ADA, TENANT_B: CLEO}
 
 
 def run() -> None:
     from superset_ownership import fga
-    from superset_ownership.identity import group_object, tenant_administrator_group
+    from superset_ownership.identity import (
+        compose_subject_id,
+        group_object,
+        split_userset,
+        tenant_administrator_group,
+    )
 
-    made = {
-        "group_tenant_tuples": 0, "admin_group_tuples": 0, "admin_members": 0,
-        "nested": 0, "identity_tenant_members": 0,
-    }
+    made = {"identity_tenant_members": 0, "admins": 0, "nested": 0}
 
     for guid, tenant in IDENTITY_MEMBERS.items():
-        if fga.write_tuple(f"user:{guid}", "member", f"tenant:{tenant}"):
+        subject = f"user:{compose_subject_id(tenant, guid)}"
+        if fga.write_tuple(subject, "member", f"tenant:{tenant}"):
             made["identity_tenant_members"] += 1
 
-    for tenant, names in GROUPS.items():
-        for name in names:
-            grp = group_object(name, tenant)
-            if fga.write_tuple(f"tenant:{tenant}#member", "tenant", grp):
-                made["group_tenant_tuples"] += 1
+    for tenant, admin_guid in TENANT_ADMINS.items():
+        # `tenant:<t>#admin` by default; a group when a shape hook says so.
+        obj, relation = split_userset(tenant_administrator_group(tenant))
+        subject = f"user:{compose_subject_id(tenant, admin_guid)}"
+        if fga.write_tuple(subject, relation, obj):
+            made["admins"] += 1
 
-        admin_group = tenant_administrator_group(tenant)
-        if fga.write_tuple(f"tenant:{tenant}#member", "tenant", admin_group):
-            made["admin_group_tuples"] += 1
-        admin_guid = TENANT_ADMINS[tenant]
-        if fga.write_tuple(f"user:{admin_guid}", "member", admin_group):
-            made["admin_members"] += 1
-
-        # Nested membership: every tenant administrator is also a
-        # dashboard_designer of the same tenant (mirrors docker/seed.sh).
+        # Nested membership: chart designers are dashboard designers too.
+        cd = group_object("chart_designer", tenant)
         dd = group_object("dashboard_designer", tenant)
-        if fga.write_tuple(f"{admin_group}#member", "member", dd):
+        if fga.write_tuple(f"{cd}#member", "member", dd):
             made["nested"] += 1
 
     print("MARK seed_fga_extra:", made)

@@ -311,7 +311,7 @@ def test_tenant_administrator_manages_own_tenant_only(harness):
     amy = harness.add_person(guid(0x31), "Amy", "Gamma", "sales_readers", role_a)
     bo = harness.add_person(guid(0x32), "Bo", "Gamma", "sales_readers", role_b)
     tam = harness.add_person(guid(0x33), "Tam", "Gamma", "sales_readers", role_a)
-    harness.authorizer.groups[f"tenant_administrator_{tenant_a}"] = {tam.ref}
+    harness.authorizer.make_tenant_administrator(tam.ref, tenant_a)
     own = harness.create_chart(ana, "tenant-a")
     other = harness.create_chart(bo, "tenant-b")
     harness.drain()

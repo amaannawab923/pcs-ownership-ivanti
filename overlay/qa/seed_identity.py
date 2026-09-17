@@ -53,8 +53,11 @@ def run() -> None:
     for guid, label, tenant, dataset in MEMBERS:
         # Tenant role carries the tenant GUID in its name -- this is what
         # identity.resolve_tenant_guid() reads back out, and it mirrors
-        # Ivanti binding their RLS rule to the tenant role.
-        role_name = f"tenant_{tenant}"
+        # Ivanti binding their RLS rule to the tenant role. Neurons' JIT
+        # login names it `Tenant_<guid>_Role` (the token's `tid` claim).
+        from superset_ownership.identity import tenant_role_name
+
+        role_name = tenant_role_name(tenant)
         role = sm.find_role(role_name) or sm.add_role(role_name)
 
         table = db.session.query(SqlaTable).filter_by(table_name=dataset).one_or_none()

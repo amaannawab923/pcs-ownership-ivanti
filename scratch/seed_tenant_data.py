@@ -77,7 +77,12 @@ EXCLUSIVE_PINNED = {"wb_health_population": TENANT_B}
 
 
 def _tenant_role(sm, db, tenant: str):
-    role = sm.find_role(f"tenant_{tenant}") or sm.add_role(f"tenant_{tenant}")
+    # Neurons' role name (`Tenant_<guid>_Role`, the token's `tid`), the same
+    # one overlay/qa/seed_identity.py gives every seeded person.
+    from superset_ownership.identity import tenant_role_name
+
+    name = tenant_role_name(tenant)
+    role = sm.find_role(name) or sm.add_role(name)
     db.session.commit()
     return role
 
@@ -181,12 +186,12 @@ def ensure_shared_datasets(db, sm) -> dict:
 
         if _upsert_rls(
             db, f"tenant_scope_{table_name}_A", ds, [subj_a],
-            f"tenant_id = '{TENANT_A}'", f"tenant_{TENANT_A}",
+            f"tenant_id = '{TENANT_A}'", role_a.name,
         ):
             made["rls"] += 1
         if _upsert_rls(
             db, f"tenant_scope_{table_name}_B", ds, [subj_b],
-            f"tenant_id = '{TENANT_B}'", f"tenant_{TENANT_B}",
+            f"tenant_id = '{TENANT_B}'", role_b.name,
         ):
             made["rls"] += 1
 
@@ -223,7 +228,7 @@ def ensure_exclusive_datasets(db, sm) -> dict:
             made["grants"] += 1
 
         name = f"tenant_scope_{t.table_name}"[:255]
-        if _upsert_rls(db, name, t, [subject], "1 = 1", f"tenant_{tenant}"):
+        if _upsert_rls(db, name, t, [subject], "1 = 1", role.name):
             made["rls"] += 1
 
     db.session.commit()
@@ -315,8 +320,8 @@ def ensure_neurons_dataset(db, sm) -> "SqlaTable":
     subj_b = _role_subject(db, role_b)
     _grant_datasource_access(sm, role_a, ds)
     _grant_datasource_access(sm, role_b, ds)
-    _upsert_rls(db, "tenant_scope_neurons_devices_A", ds, [subj_a], f"tenant_id = '{TENANT_A}'", f"tenant_{TENANT_A}")
-    _upsert_rls(db, "tenant_scope_neurons_devices_B", ds, [subj_b], f"tenant_id = '{TENANT_B}'", f"tenant_{TENANT_B}")
+    _upsert_rls(db, "tenant_scope_neurons_devices_A", ds, [subj_a], f"tenant_id = '{TENANT_A}'", role_a.name)
+    _upsert_rls(db, "tenant_scope_neurons_devices_B", ds, [subj_b], f"tenant_id = '{TENANT_B}'", role_b.name)
     db.session.commit()
     return ds
 

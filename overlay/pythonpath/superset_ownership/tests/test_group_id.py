@@ -46,6 +46,7 @@ from superset_ownership.identity import (
     group_display_name,
     group_id,
     group_id_format,
+    GROUP_ID_FORMAT_NEURONS,
     GROUP_ID_FORMAT_PREFIX,
     GROUP_ID_FORMAT_SETTING,
     GROUP_ID_FORMAT_SUFFIX,
@@ -64,6 +65,7 @@ BEN = "6c2b48e9-5a71-4f92-8d03-2e9b7c1a4d53"
 CLEO = "9d7e35a1-8c62-4b04-a7f1-3d5e9b2c8a76"
 
 FORMATS = [
+    pytest.param(GROUP_ID_FORMAT_NEURONS, id="neurons"),
     pytest.param(GROUP_ID_FORMAT_SUFFIX, id="suffix"),
     pytest.param(GROUP_ID_FORMAT_PREFIX, id="prefix"),
 ]
@@ -82,9 +84,10 @@ def fmt(request, monkeypatch):
 @pytest.mark.parametrize(
     "raw, expected",
     [
-        (None, ("", "name", "_", "")),
-        ("", ("", "name", "_", "")),
-        ("   ", ("", "name", "_", "")),
+        (None, ("", "tenant", ".", "")),
+        ("", ("", "tenant", ".", "")),
+        ("   ", ("", "tenant", ".", "")),
+        (GROUP_ID_FORMAT_NEURONS, ("", "tenant", ".", "")),
         (GROUP_ID_FORMAT_SUFFIX, ("", "name", "_", "")),
         (GROUP_ID_FORMAT_PREFIX, ("", "tenant", "_", "")),
         ("{tenant}-{name}", ("", "tenant", "-", "")),
@@ -132,15 +135,17 @@ def test_a_bad_value_is_a_value_error_for_a_startup_check():
 
 
 def test_format_read_from_env_then_default(monkeypatch):
+    # The default is Neurons' shape: `<tenant-guid>.<group-local-id>`.
     monkeypatch.delenv(GROUP_ID_FORMAT_SETTING, raising=False)
-    assert group_id_format() == GROUP_ID_FORMAT_SUFFIX
+    assert group_id_format() == GROUP_ID_FORMAT_NEURONS
     monkeypatch.setenv(GROUP_ID_FORMAT_SETTING, "")
-    assert group_id_format() == GROUP_ID_FORMAT_SUFFIX
+    assert group_id_format() == GROUP_ID_FORMAT_NEURONS
     # Whitespace-only is blank too, and what is reported is the template in
     # force -- the default -- not the blank that resolved to it.
     monkeypatch.setenv(GROUP_ID_FORMAT_SETTING, "   ")
-    assert group_id_format() == GROUP_ID_FORMAT_SUFFIX
-    assert group_id("eng", TENANT_A) == f"eng_{TENANT_A}"
+    assert group_id_format() == GROUP_ID_FORMAT_NEURONS
+    assert group_id("eng", TENANT_A) == f"{TENANT_A}.eng"
+    assert split_group_id(f"group:{TENANT_A}.eng#member") == ("eng", TENANT_A)
     monkeypatch.setenv(GROUP_ID_FORMAT_SETTING, GROUP_ID_FORMAT_PREFIX)
     assert group_id_format() == GROUP_ID_FORMAT_PREFIX
 
@@ -167,9 +172,26 @@ def test_flask_config_wins_over_env(monkeypatch):
 # --- build and split --------------------------------------------------------
 
 
-def test_suffix_format_is_the_existing_shape(monkeypatch):
-    """The default reproduces every id already in the store, byte for byte."""
+def test_neurons_format_is_the_default(monkeypatch):
+    """The default is what Neurons writes: `<tenant-guid>.<group-local-id>`,
+    nested as-is, no separate group-to-tenant tuple."""
     monkeypatch.delenv(GROUP_ID_FORMAT_SETTING, raising=False)
+    assert group_id("dashboard_designer", TENANT_A) == f"{TENANT_A}.dashboard_designer"
+    assert (
+        group_ref("chart_designer", TENANT_A)
+        == f"group:{TENANT_A}.chart_designer#member"
+    )
+    assert split_group_id(f"group:{TENANT_A}.chart_designer") == (
+        "chart_designer",
+        TENANT_A,
+    )
+    assert group_belongs_to_tenant(f"{TENANT_A}.chart_designer", TENANT_A)
+    assert not group_belongs_to_tenant(f"{TENANT_A}.chart_designer", TENANT_B)
+
+
+def test_suffix_format_is_the_pre_configuration_shape(monkeypatch):
+    """The shape the module generated before Ivanti confirmed theirs."""
+    monkeypatch.setenv(GROUP_ID_FORMAT_SETTING, GROUP_ID_FORMAT_SUFFIX)
     assert group_id("dashboard_designer", TENANT_A) == f"dashboard_designer_{TENANT_A}"
     assert (
         group_object("chart_designer", TENANT_A) == f"group:chart_designer_{TENANT_A}"
@@ -178,9 +200,9 @@ def test_suffix_format_is_the_existing_shape(monkeypatch):
         group_ref("chart_designer", TENANT_A)
         == f"group:chart_designer_{TENANT_A}#member"
     )
-    assert (
-        tenant_administrator_group(TENANT_A) == f"group:tenant_administrator_{TENANT_A}"
-    )
+    # The administrators are not a group in any format: the `admin`
+    # relation on the tenant object (Neurons' shape).
+    assert tenant_administrator_group(TENANT_A) == f"tenant:{TENANT_A}#admin"
 
 
 def test_prefix_format_is_the_sow_shape(monkeypatch):
@@ -190,9 +212,7 @@ def test_prefix_format_is_the_sow_shape(monkeypatch):
         group_ref("chart_designer", TENANT_A)
         == f"group:{TENANT_A}_chart_designer#member"
     )
-    assert (
-        tenant_administrator_group(TENANT_A) == f"group:{TENANT_A}_tenant_administrator"
-    )
+    assert tenant_administrator_group(TENANT_A) == f"tenant:{TENANT_A}#admin"
 
 
 @pytest.mark.parametrize(
@@ -306,7 +326,7 @@ def test_group_id_refuses_a_tenant_it_could_not_read_back(fmt, tenant):
     with pytest.raises(ValueError, match="GUID v4"):
         group_id("eng", tenant)
     with pytest.raises(ValueError, match="GUID v4"):
-        tenant_administrator_group(tenant)
+        group_object("tenant_administrator", tenant)
 
 
 @pytest.mark.parametrize(
@@ -553,7 +573,8 @@ def test_openfga_authorizer_checks_the_configured_administrator_group(fmt, monke
         lambda user, relation, obj: seen.append((user, relation, obj)) or True,
     )
     assert OpenFGAAuthorizer().user_in_group(ADA, tenant_administrator_group(TENANT_A))
-    assert seen == [(f"user:{ADA}", "member", tenant_administrator_group(TENANT_A))]
+    # The tenant userset: one check of the `admin` relation on the tenant.
+    assert seen == [(f"user:{ADA}", "admin", f"tenant:{TENANT_A}")]
 
 
 def test_local_authorizer_matches_the_administrator_role_by_configured_id(
@@ -561,8 +582,10 @@ def test_local_authorizer_matches_the_administrator_role_by_configured_id(
 ):
     from superset_ownership.authz import LocalAuthorizer
 
+    # The local backend's convention for the tenant's admin relation is the
+    # fixed `tenant_administrator_<guid>` role, whatever the group format.
     superset_stub.security_manager = FakeSecurityManager(
-        [User(1, ADA, [Role(group_id("tenant_administrator", TENANT_A))])]
+        [User(1, ADA, [Role(f"tenant_administrator_{TENANT_A}")])]
     )
     assert LocalAuthorizer().user_in_group(ADA, tenant_administrator_group(TENANT_A))
     assert not LocalAuthorizer().user_in_group(
@@ -832,7 +855,7 @@ def test_purge_tenant_collects_only_groups_in_the_configured_format(
     from superset_ownership import audit, fga, lifecycle, sentinel, service
 
     ours = group_object("dashboard_designer", TENANT_A)
-    admins = tenant_administrator_group(TENANT_A)
+    admins = group_object("tenant_administrator", TENANT_A)
     other_shape = (
         f"group:dashboard_designer_{TENANT_A}"
         if fmt == GROUP_ID_FORMAT_PREFIX
@@ -1108,6 +1131,10 @@ def test_group_id_mismatches_lists_group_shares_the_format_cannot_parse(fmt, tmp
         ],
     )
     other = prefix if fmt == GROUP_ID_FORMAT_SUFFIX else suffix
+    if fmt == GROUP_ID_FORMAT_NEURONS:
+        # Under Neurons' shape both underscore spellings are foreign.
+        assert group_id_mismatches(session) == sorted([prefix, suffix])
+        return
     # Distinct, sorted; users are never looked at. A tenanted id in the
     # other shape is a mismatch; a group with no tenant in its id is not a
     # mismatch under either format -- it is reported in its own bucket.
@@ -1124,9 +1151,12 @@ def test_a_guid_elsewhere_in_the_name_still_parses(fmt, tmp_path):
     both formats, so it is in neither bucket."""
     from superset_ownership.lifecycle import group_share_buckets
 
-    session = _share_mirror(
-        tmp_path, [f"group:{TENANT_A}_dashboard_designer_{TENANT_B}#member"]
+    twice = (
+        f"group:{TENANT_A}.dashboard_designer_{TENANT_B}#member"
+        if fmt == GROUP_ID_FORMAT_NEURONS
+        else f"group:{TENANT_A}_dashboard_designer_{TENANT_B}#member"
     )
+    session = _share_mirror(tmp_path, [twice])
     assert group_share_buckets(session) == {
         "group_id_mismatch": [],
         "group_untenanted": [],
@@ -1141,9 +1171,12 @@ def consistency_seams(superset_models_stub, monkeypatch):
 
     from superset_ownership import lifecycle, outbox, sentinel
 
+    from superset_ownership import dashboard_patch
+
     monkeypatch.setattr(lifecycle, "all_rows", lambda model: [])
     monkeypatch.setattr(sentinel, "get_sentinel_subject", lambda: None)
     monkeypatch.setattr(outbox, "enabled", lambda: False)
+    monkeypatch.setattr(dashboard_patch, "installed", lambda: True)
 
     def use(session):
         superset_models_stub.db = SimpleNamespace(session=session)
@@ -1166,7 +1199,21 @@ def test_check_consistency_fails_on_group_shares_in_the_other_format(
     report = lifecycle.check_consistency()
     assert report["group_id_mismatch"] == []
     assert report["group_untenanted"] == []
-    assert report["ok"] is True
+    assert report["ok"] is True, {
+        k: v
+        for k, v in report.items()
+        if k
+        in (
+            "flags_agree",
+            "dashboard_chart_patch_installed",
+            "constraints_error",
+            "outbox",
+            "schema_behind",
+            "untenanted_public_repairable",
+            "constraints_missing",
+            "constraints_unvalidated",
+        )
+    }
 
     # The same mirror read under the other format.
     other = (
@@ -1177,9 +1224,11 @@ def test_check_consistency_fails_on_group_shares_in_the_other_format(
     monkeypatch.setenv(GROUP_ID_FORMAT_SETTING, other)
     report = lifecycle.check_consistency()
     assert report["group_id_mismatch"] == [
-        f"group:dashboard_designer_{TENANT_A}#member"
-        if fmt == GROUP_ID_FORMAT_SUFFIX
-        else f"group:{TENANT_A}_dashboard_designer#member"
+        {
+            GROUP_ID_FORMAT_SUFFIX: f"group:dashboard_designer_{TENANT_A}#member",
+            GROUP_ID_FORMAT_PREFIX: f"group:{TENANT_A}_dashboard_designer#member",
+            GROUP_ID_FORMAT_NEURONS: f"group:{TENANT_A}.dashboard_designer#member",
+        }[fmt]
     ]
     assert report["ok"] is False
 
@@ -1202,7 +1251,21 @@ def test_check_consistency_reports_untenanted_group_shares_without_failing(
     report = lifecycle.check_consistency()
     assert report["group_untenanted"] == ["group:Gamma#member", "group:eng#member"]
     assert report["group_id_mismatch"] == []
-    assert report["ok"] is True
+    assert report["ok"] is True, {
+        k: v
+        for k, v in report.items()
+        if k
+        in (
+            "flags_agree",
+            "dashboard_chart_patch_installed",
+            "constraints_error",
+            "outbox",
+            "schema_behind",
+            "untenanted_public_repairable",
+            "constraints_missing",
+            "constraints_unvalidated",
+        )
+    }
 
     # Nor under the other format: untenanted is format-independent.
     other = (
@@ -1214,7 +1277,21 @@ def test_check_consistency_reports_untenanted_group_shares_without_failing(
     report = lifecycle.check_consistency()
     assert report["group_untenanted"] == ["group:Gamma#member", "group:eng#member"]
     assert report["group_id_mismatch"] == []
-    assert report["ok"] is True
+    assert report["ok"] is True, {
+        k: v
+        for k, v in report.items()
+        if k
+        in (
+            "flags_agree",
+            "dashboard_chart_patch_installed",
+            "constraints_error",
+            "outbox",
+            "schema_behind",
+            "untenanted_public_repairable",
+            "constraints_missing",
+            "constraints_unvalidated",
+        )
+    }
 
 
 # --- lifecycle: what the boot log says -------------------------------------
@@ -1270,7 +1347,21 @@ def test_startup_check_mentions_untenanted_shares_at_info_and_stays_ok(
     caplog.set_level(logging.INFO, logger="superset_ownership.lifecycle")
     report = lifecycle.startup_check()
 
-    assert report["ok"] is True
+    assert report["ok"] is True, {
+        k: v
+        for k, v in report.items()
+        if k
+        in (
+            "flags_agree",
+            "dashboard_chart_patch_installed",
+            "constraints_error",
+            "outbox",
+            "schema_behind",
+            "untenanted_public_repairable",
+            "constraints_missing",
+            "constraints_unvalidated",
+        )
+    }
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
     assert any(

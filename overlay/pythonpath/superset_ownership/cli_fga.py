@@ -197,15 +197,23 @@ def fga_install_model(
     api_url_override: str | None,
     credentials_env_override: str | None,
 ) -> None:
-    """Write MODEL (the DSL's JSON source of truth) as a new authorization-model
-    version.
+    """Install this module's types into the store's authorization model.
 
-    S6: a no-op when the store's latest model already has the same
-    ``type_definitions`` -- two consecutive runs against an unchanged
-    ``MODEL`` must not accumulate a new model version each time, or a
-    pinned deployment's pin silently lags the version an unpinned reader
-    already sees, and a repeated runbook invocation grows the store for
-    nothing.
+    An empty store gets MODEL (the DSL's JSON source of truth) whole. A
+    store that already has a model -- Ivanti publishes theirs, with the
+    user, tenant and group types their platform writes -- gets its latest
+    model with our dashboard and chart types added or replaced and
+    nothing of theirs rewritten (`model.merge_into`); a referenced type
+    they lack is added whole, a relation ours needs on one they have
+    (`tenant#admin`) is added beside theirs, never written over. The
+    `model.missing_relations` guard after the merge is exactly that -- a
+    guard against a merge that left a needed relation out, which the
+    merge by construction does not.
+
+    S6: a no-op when the store's latest model already carries our types
+    as they are -- two consecutive runs must not accumulate a new model
+    version each time, or a pinned deployment's pin silently lags the
+    version an unpinned reader already sees.
     """
     try:
         conn = plugins.get_fga_connection()
@@ -229,13 +237,27 @@ def fga_install_model(
         click.echo(f"ownership: install-model failed: {exc}", err=True)
         raise SystemExit(1) from None
 
-    if latest is not None and model_signature(latest) == model_signature(MODEL):
-        _emit({"model_id": latest["id"], "store": conn.store_id, "installed": False})
-        click.echo("ownership: install-model: already current", err=True)
-        return
+    to_write = MODEL
+    if latest is not None:
+        from superset_ownership.model import merge_into, missing_relations
+
+        to_write = merge_into(latest)
+        lacking = missing_relations(to_write)
+        if lacking:  # cannot happen after a merge; a guard, not a branch
+            click.echo(
+                f"ownership: install-model refused: merged model lacks {lacking}",
+                err=True,
+            )
+            raise SystemExit(1)
+        if model_signature(latest) == model_signature(to_write):
+            _emit(
+                {"model_id": latest["id"], "store": conn.store_id, "installed": False}
+            )
+            click.echo("ownership: install-model: already current", err=True)
+            return
 
     try:
-        model_id = fga.write_model(MODEL, connection=conn)
+        model_id = fga.write_model(to_write, connection=conn)
     except fga.StoreError as exc:
         click.echo(f"ownership: install-model failed: {exc}", err=True)
         raise SystemExit(1) from None

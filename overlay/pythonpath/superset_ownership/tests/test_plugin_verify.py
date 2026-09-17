@@ -129,6 +129,9 @@ class FakeDirectory:
     def user_in_group(self, user_guid, group_id):
         return self.membership.get((user_guid, group_id), False)
 
+    def tenant_administrators(self, tenant):
+        return list(getattr(self, "admins_by_tenant", {}).get(tenant, []))
+
     def health(self):
         from dataclasses import dataclass
 
@@ -319,7 +322,9 @@ def test_scratch_tuple_roundtrip_calls_are_all_strict():
 # ---------------------------------------------------------------------------
 
 
-def test_group_has_tenant_tuple_pass_fail_skip():
+def test_group_has_tenant_tuple_pass_fail_skip(monkeypatch):
+    monkeypatch.delenv("OWNERSHIP_DIRECTORY_GROUP_WALK", raising=False)
+
     class Dir:
         # `(self, tenant, cursor)` -- the real `OpenFGADirectory._fast_groups`
         # signature; a fake that dropped `cursor` never caught the real
@@ -334,16 +339,44 @@ def test_group_has_tenant_tuple_pass_fail_skip():
     ctx = make_ctx(tenant="t1", directory=Dir())
     assert pv.GroupHasTenantTuple().run(ctx).status == "PASS"
 
-    class DirMissing:
+    class DirPartial:
+        # One group has the tuple and one does not: a half-done backfill.
+        def _fast_groups(self, tenant, cursor):
+            return _page([{"id": "group:a"}])
+
+        def _walk_groups(self, tenant):
+            return _page([{"id": "group:a"}, {"id": "group:untenanted"}])
+
+    result = pv.GroupHasTenantTuple().run(make_ctx(tenant="t1", directory=DirPartial()))
+    assert result.status == "FAIL"
+    assert "group:untenanted" in result.detail
+
+    class DirNone:
+        # No group has the tuple: Neurons' store, where the tenant is read
+        # from the id and no group->tenant tuple is ever written. Not a
+        # FAIL; a WARN in `auto` mode (every listing walks after an empty
+        # read), a PASS once the walk is configured outright.
+        _mode = "auto"
+
         def _fast_groups(self, tenant, cursor):
             return _page([])
 
         def _walk_groups(self, tenant):
-            return _page([{"id": "group:untenanted"}])
+            return _page([{"id": "group:t1.eng"}, {"id": "group:t1.ops"}])
 
-    result = pv.GroupHasTenantTuple().run(make_ctx(tenant="t1", directory=DirMissing()))
-    assert result.status == "FAIL"
-    assert "group:untenanted" in result.detail
+    result = pv.GroupHasTenantTuple().run(make_ctx(tenant="t1", directory=DirNone()))
+    assert result.status == "WARN"
+    assert "GROUP_WALK=always" in result.detail
+    # `--force-walk` sets the directory's `_mode` for this process only;
+    # the verdict reads the CONFIGURED setting, so a forced walk on an
+    # `auto` deployment still gets the WARN (review of PR #114).
+    DirNone._mode = "always"
+    result = pv.GroupHasTenantTuple().run(make_ctx(tenant="t1", directory=DirNone()))
+    assert result.status == "WARN"
+    monkeypatch.setenv("OWNERSHIP_DIRECTORY_GROUP_WALK", "always")
+    result = pv.GroupHasTenantTuple().run(make_ctx(tenant="t1", directory=DirNone()))
+    assert result.status == "PASS"
+    assert "2 group(s) walked" in result.detail
 
     # LocalDirectory has no fast-path helpers.
     class LocalLike:
@@ -423,6 +456,53 @@ def test_administrator_group_exists():
         tenant_administrator_group=lambda t: f"group:admin_{t}",
     )
     assert pv.AdministratorGroupExists().run(ctx).status == "WARN"
+
+
+def test_administrator_group_exists_on_the_tenant_admin_userset():
+    """PR #113 review B2: with the default `tenant:<t>#admin` there is no
+    group to look up; the check asks who holds the relation instead of
+    handing the userset to `group_exists` (which read `group:tenant:...`)."""
+    directory = FakeDirectory()
+    directory.admins_by_tenant = {"t1": [{"guid": "t1.u1", "superset_id": 1}]}
+    ctx = make_ctx(
+        tenant="t1",
+        directory=directory,
+        tenant_administrator_group=lambda t: f"tenant:{t}#admin",
+    )
+    result = pv.AdministratorGroupExists().run(ctx)
+    assert result.status == "PASS", result.detail
+    assert "1 administrator" in result.detail
+
+    directory.admins_by_tenant = {}
+    result = pv.AdministratorGroupExists().run(ctx)
+    assert result.status == "WARN"
+    assert "no holder" in result.detail
+
+
+def test_no_member_in_two_tenants_compares_by_member_half():
+    """PR #113 review B2: the store id carries the tenant, so the other
+    tenant's membership must be asked under ITS spelling of the member --
+    asking `user:<A>.<m>` against `tenant:<B>` never finds anything."""
+    t1 = "a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40"
+    t2 = "b7f28e5a-9c14-4d6b-a2f0-5e3d8c1a6b92"
+    m = "3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31"
+    directory = FakeDirectory(
+        users_by_tenant={t1: [{"guid": f"{t1}.{m}", "superset_id": 1}]}
+    )
+    authorizer = FakeAuthorizer()
+    ctx = make_ctx(
+        tenant=t1,
+        candidate_tenants=[t1, t2],
+        directory=directory,
+        authorizer=authorizer,
+    )
+    authorizer.tuples.add((f"user:{t1}.{m}", "member", f"tenant:{t1}"))
+    assert pv.NoMemberInTwoTenants().run(ctx).status == "PASS"
+
+    authorizer.tuples.add((f"user:{t2}.{m}", "member", f"tenant:{t2}"))
+    result = pv.NoMemberInTwoTenants().run(ctx)
+    assert result.status == "FAIL"
+    assert f"{m} in {t1} and {t2}" in result.detail
 
 
 def test_no_member_in_two_tenants():
@@ -731,6 +811,26 @@ def test_guid_v4_pass_and_fail():
     ctx = make_ctx(jit_users=["u1"], identity=identity)
     result = pv.GuidV4().run(ctx)
     assert result.status == "FAIL"
+
+
+def test_guid_v4_accepts_the_store_id_shape():
+    """PR #113 review B2: `member_guid` is the store id, `<tenant>.<member>`
+    for a tenant's member; both halves must be GUID v4."""
+    t = "a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40"
+    m = "3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31"
+    identity = FakeIdentity(guids={"u1": f"{t}.{m}"})
+    assert (
+        pv.GuidV4().run(make_ctx(jit_users=["u1"], identity=identity)).status == "PASS"
+    )
+
+    identity = FakeIdentity(guids={"u1": f"{t}.not-a-guid"})
+    assert (
+        pv.GuidV4().run(make_ctx(jit_users=["u1"], identity=identity)).status == "FAIL"
+    )
+
+    assert pv._validate_caller_result("OWNERSHIP_MEMBER_GUID", f"{t}.{m}") is None
+    assert pv._validate_caller_result("OWNERSHIP_MEMBER_GUID", "local-3") is None
+    assert pv._validate_caller_result("OWNERSHIP_MEMBER_GUID", f"{t}.nope") is not None
 
 
 def test_tenant_known_to_store():
@@ -1693,18 +1793,46 @@ def test_fixtures_broken_group_without_tenant_tuple():
     clean = pv.fixtures.tuples()
     broken = pv.fixtures.tuples(broken="group_without_tenant_tuple")
     assert len(broken) == len(clean) - 1
-    dd_a = pv.fixtures.group_id("dashboard_designer", pv.fixtures.TENANT_A)
+    dd_a = pv.fixtures.group_object("dashboard_designer", pv.fixtures.TENANT_A)
     assert not any(r["relation"] == "tenant" and r["object"] == dd_a for r in broken)
 
 
 def test_fixtures_broken_cross_tenant_member():
+    """Under Neurons' shapes the store id carries the tenant, so the same
+    person in two tenants is `user:<A>.<m>` in A and `user:<B>.<m>` in B --
+    the fixture writes the member under each tenant's own spelling."""
+    from superset_ownership.identity import member_guid_of_subject_id
+
     broken = pv.fixtures.tuples(broken="cross_tenant_member")
-    ada = f"user:{pv.fixtures.ADA}"
     tenants = {
-        r["object"] for r in broken if r["user"] == ada and r["relation"] == "member"
+        r["object"]
+        for r in broken
+        if r["relation"] == "member"
+        and r["user"].startswith("user:")
+        and member_guid_of_subject_id(r["user"][5:]) == pv.fixtures.ADA
     }
     assert f"tenant:{pv.fixtures.TENANT_A}" in tenants
     assert f"tenant:{pv.fixtures.TENANT_B}" in tenants
+
+
+def test_fixtures_are_neurons_shaped():
+    """PR #113: the verify fixtures write what `qa/seed_fga.sh` writes --
+    dotted subjects, `{tenant}.{name}` group ids under the default format,
+    and the tenant's administrators as `admin` on the tenant object, never
+    a `tenant_administrator` group."""
+    rows = pv.fixtures.tuples()
+    a = pv.fixtures.TENANT_A
+    assert {
+        "user": f"user:{a}.{pv.fixtures.ADA}",
+        "relation": "admin",
+        "object": f"tenant:{a}",
+    } in rows
+    assert not any("tenant_administrator" in r["object"] for r in rows)
+    group_ids = {r["object"] for r in rows if r["object"].startswith("group:")}
+    assert f"group:{a}.dashboard_designer" in group_ids
+    for r in rows:
+        if r["user"].startswith("user:"):
+            assert "." in r["user"], r
 
 
 def test_fixtures_broken_wrong_format_id():
@@ -1857,6 +1985,56 @@ def test_invariant_probe_fails_when_the_directory_touches_the_access_path(
     )
     result = pv.OwnerZeroCalls().run(pv.Context(invariant_probe=lambda kind: calls))
     assert result.status == "FAIL"
+
+
+def test_shape_pair_roundtrip_skips_the_tenant_admin_userset():
+    """PR #113 review B2: `tenant:<t>#admin` is not a group id and must not
+    be fed to `split_group_id`."""
+    from superset_ownership.identity import group_id, split_group_id
+
+    ctx = make_ctx(
+        tenant="a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40",
+        directory=FakeDirectory(),
+        group_id=group_id,
+        split_group_id=split_group_id,
+        tenant_administrator_group=lambda t: f"tenant:{t}#admin",
+    )
+    result = pv.ShapePairRoundtrip().run(ctx)
+    assert result.status == "PASS", result.detail
+
+
+def test_discover_candidate_tenants_and_jit_users_under_the_neurons_role(harness):
+    """PR #113 review B2: the tenant role is `Tenant_<guid>_Role`; the
+    candidate scan returns the GUID (not the role name) and the JIT sample
+    finds a member holding that role, with and without `--tenant`."""
+    from superset import security_manager
+    from superset_harness import PASSWORD
+
+    from superset_ownership.identity import tenant_role_name
+
+    tenant_guid = "d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f71"
+    with harness.ctx():
+        role = security_manager.find_role(tenant_role_name(tenant_guid))
+        if role is None:
+            role = security_manager.add_role(tenant_role_name(tenant_guid))
+        user = security_manager.find_user(username="neurons-member-b2")
+        if user is None:
+            user = security_manager.add_user(
+                "neurons-member-b2",
+                "Neurons",
+                "Member",
+                "nb2@example.test",
+                role,
+                password=PASSWORD,  # noqa: S106 - the harness constant, a test account
+            )
+        tenants = pv._discover_candidate_tenants()
+        assert tenant_guid in tenants
+        assert not any(t.lower().startswith("tenant_") for t in tenants)
+        sampled = pv._discover_jit_users(tenant_guid, 10)
+        assert user.id in {u.id for u in sampled}
+        sampled_any = pv._discover_jit_users(None, 100)
+        assert user.id in {u.id for u in sampled_any}
+        assert pv._discover_jit_users("00000000-0000-4000-8000-000000000000", 10) == []
 
 
 def test_discover_candidate_tenants_only_collects_structural_tenant_roles(harness):

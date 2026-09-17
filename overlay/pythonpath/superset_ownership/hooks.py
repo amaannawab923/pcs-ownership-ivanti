@@ -705,9 +705,12 @@ def editor_share_user_ids(asset_type: str, object_id: int, row: Any) -> list[int
         guid = canonical.split(":", 1)[1] if canonical else None
         if not guid:
             continue
-        user = security_manager.find_user(username=guid)
-        if user is None and guid.startswith("local-"):
-            user = security_manager.get_user_by_id(int(guid[6:]))
+        from superset_ownership.identity import member_guid_of_subject_id
+
+        member = member_guid_of_subject_id(guid) or guid
+        user = security_manager.find_user(username=member)
+        if user is None and member.startswith("local-"):
+            user = security_manager.get_user_by_id(int(member[6:]))
         # Deactivated confers nothing (mirrors is_unowned); cross-tenant
         # confers nothing (mirrors the read gate's tenant scoping).
         if user is not None and getattr(user, "is_active", False) and in_tenant(user):

@@ -382,7 +382,8 @@ def test_fixed_groups_directory_search_users_paginates_for_real(
         small = walk(1)
         large = walk(100)
     assert len(small) == len(set(small)), "no duplicate across small pages"
-    assert set(small) == set(large) == {p.username for p in people}
+    # The guid is the store id: `<tenant>.<member>` (PR #113).
+    assert set(small) == set(large) == {p.ref.removeprefix("user:") for p in people}
 
 
 def test_fixed_groups_directory_group_exists_and_not_found(example_on_path):
@@ -393,6 +394,36 @@ def test_fixed_groups_directory_group_exists_and_not_found(example_on_path):
     tenant = "a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40"
     assert directory.group_exists(group_id("blue", tenant)) is True
     assert directory.group_exists(f"eng_{tenant}") is False
+
+
+def test_example_user_in_group_takes_a_tenant_admin_userset_apart(
+    example_on_path, monkeypatch
+):
+    """PR #113 review: `OWNERSHIP_USER_IN_GROUP` is asked about
+    `tenant:<t>#admin` (the tenant-administrator question under Neurons'
+    shape) as well as group ids; the example used to prepend `group:` to
+    whatever arrived, so `group:tenant:<t>#admin` reached the store and
+    nobody was ever an administrator through that hook."""
+    from ivanti_pcs_example import hooks
+    from superset_ownership import fga
+
+    tenant = "a1e4c2d0-3b5f-4a91-8c2e-1f6a9d3b7c40"
+    member = f"{tenant}.3f0a91c7-2d84-4e63-9b15-7c4e8a2f6d31"
+    asked: list[tuple[str, str, str]] = []
+
+    def fake_check(user, relation, obj, **_kw):
+        asked.append((user, relation, obj))
+        return True
+
+    monkeypatch.setattr(fga, "check", fake_check)
+    assert hooks.user_in_group(member, f"tenant:{tenant}#admin") is True
+    assert hooks.user_in_group(member, f"{tenant}.eng") is True
+    assert hooks.user_in_group(member, f"group:{tenant}.eng#member") is True
+    assert asked == [
+        (f"user:{member}", "admin", f"tenant:{tenant}"),
+        (f"user:{member}", "member", f"group:{tenant}.eng"),
+        (f"user:{member}", "member", f"group:{tenant}.eng"),
+    ]
 
 
 def test_fixed_groups_directory_health_reports_ok(example_on_path):
@@ -894,7 +925,12 @@ def test_config_hooks_example_loads_all_sixteen_as_config(
         name
         for name in vars(config)
         if name.startswith("OWNERSHIP_")
-        and name not in ("OWNERSHIP_AUTHORIZER", "OWNERSHIP_DIRECTORY")
+        and name
+        not in (
+            "OWNERSHIP_AUTHORIZER",
+            "OWNERSHIP_DIRECTORY",
+            "OWNERSHIP_DIRECTORY_GROUP_WALK",
+        )
     ]
     assert len(hook_settings) == 16, sorted(hook_settings)
 
