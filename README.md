@@ -81,8 +81,11 @@ A different PCS tag: `./setup.sh --pcs-ref <tag> ...` (default v6.1.0.7).
    Ben now owns the chart. Reopen the drawer as Ada: she is told she is not
    the owner, the sharing options are greyed out, and she is offered **Take
    ownership**. A tenant administrator decides who *owns* an object, never
-   who *sees* it -- to change the sharing she takes it first, and the Owner
-   column then says so.
+   who *else* sees it -- to change the sharing she takes it first, and the
+   Owner column then says so. She does see every object of her own tenant,
+   private ones included (otherwise the row to act on would not be there);
+   log in as Ben, make the chart Private, and it is still in Ada's list and
+   opens for her, while Marcus (a plain member) no longer sees it.
 
 ### 4. Complete example, login by login: Ada and Ben and one chart
 
@@ -505,9 +508,9 @@ COPY overlay/frontend/ /app/superset-frontend/
 # venv is already fully pinned and everything the wheel needs is in it.
 # Build the wheel with packaging/build-wheel.sh (or take the one Preset
 # ships) -- it is a plain, pure-Python wheel.
-COPY superset_ownership-0.4.0-py3-none-any.whl /tmp/
-RUN uv pip install --python /app/.venv/bin/python --no-deps /tmp/superset_ownership-0.4.0-py3-none-any.whl \
- && rm /tmp/superset_ownership-0.4.0-py3-none-any.whl
+COPY superset_ownership-0.5.0-py3-none-any.whl /tmp/
+RUN uv pip install --python /app/.venv/bin/python --no-deps /tmp/superset_ownership-0.5.0-py3-none-any.whl \
+ && rm /tmp/superset_ownership-0.5.0-py3-none-any.whl
 
 # the ONE pythonpath entry -- a single file, never a directory COPY or bind
 # mount over your image's PYTHONPATH entry (the earlier pcs-ivanti spike's

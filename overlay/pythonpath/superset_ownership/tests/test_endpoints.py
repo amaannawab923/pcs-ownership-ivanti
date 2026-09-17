@@ -4290,3 +4290,262 @@ def test_an_unclassifiable_integrity_error_on_the_share_insert_answers_a_fixed_5
     assert "metadb" in errors[0][1], "the driver text is in the log, not the body"
     assert "answered 500 with a fixed body" in errors[1][1]
     assert harness.events("ownership.share_added") == []
+
+
+# --- a tenant administrator reads every object of their tenant (PR #116) --------------
+
+
+def _tenant_admin_world(harness, base: int):
+    """Ana (owner) and Tam (tenant administrator) in tenant A, Cleo the
+    administrator of tenant B, plus one private chart of Ana's on a
+    published dashboard."""
+    from superset_ownership.identity import tenant_role_name
+
+    tenant_a, tenant_b = guid(0xA), guid(0xB)
+    role_a, role_b = tenant_role_name(tenant_a), tenant_role_name(tenant_b)
+    ana = harness.add_person(guid(base), f"Ana{base}", "Gamma", "sales_readers", role_a)
+    tam = harness.add_person(
+        guid(base + 1), f"Tam{base}", "Gamma", "sales_readers", role_a
+    )
+    cleo = harness.add_person(
+        guid(base + 2), f"Cleo{base}", "Gamma", "sales_readers", role_b
+    )
+    harness.authorizer.make_tenant_administrator(tam.ref, tenant_a)
+    harness.authorizer.make_tenant_administrator(cleo.ref, tenant_b)
+    chart = harness.create_chart(ana, f"admin-reads-{base}")
+    dash = harness.create_dashboard(ana, chart, title=f"admin-reads-dash-{base}")
+    harness.drain()
+    assert harness.row(chart).visibility == "private"
+    assert harness.row(dash).visibility == "private"
+    assert harness.row(chart).tenant_guid == tenant_a
+    return tenant_a, ana, tam, cleo, chart, dash
+
+
+def test_tenant_administrator_reads_every_object_of_their_tenant(harness):
+    """Option B (the user's call after the manual round): an object hidden
+    from the tenant administrator is one they cannot re-home -- the row to
+    click "Sharing" on is not there. So the administrator lists, opens and
+    loads the data of every object of their own tenant, private or shared,
+    from the row's mirrored tenant and one cached administrator check, with
+    no store `check` on the object; the other tenant's administrator still
+    gets nothing; and the sharing itself stays the owner's (403)."""
+    from superset.dashboards.api import DashboardRestApi
+
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x150)
+
+    for ref in (chart, dash):
+        d = harness.decide(tam, ref)
+        assert d.verdict == ALLOW, (ref, d)
+        assert "check" not in d.names, d.names
+        assert harness.decide(cleo, ref).verdict == DENY
+        assert harness.detail(tam, ref).status_code == 200
+        assert harness.detail(cleo, ref).status_code == 404
+    assert chart.id in harness.listed_ids(tam, "chart")
+    assert dash.id in harness.listed_ids(tam, "dashboard")
+    assert chart.id not in harness.listed_ids(cleo, "chart")
+    assert dash.id not in harness.listed_ids(cleo, "dashboard")
+
+    # The chart's data and its tile, the same answer as opening it.
+    r = harness.post(tam, "/api/v1/chart/data", harness.query_context(chart.id))
+    assert r.status_code == 200, r.get_json()
+    r = harness.post(cleo, "/api/v1/chart/data", harness.query_context(chart.id))
+    assert r.status_code == 403
+    with harness.acting_as(tam):
+        tile = DashboardRestApi._serialize_dashboard_chart(
+            DashboardRestApi(), harness._load(chart)
+        )
+    assert "has_access" not in tile
+    assert "form_data" in tile
+
+    # Reading is not sharing: the ownership detail says so, and the writes
+    # answer as before (PR #112).
+    r = harness.get(tam, f"/api/v1/ownership/chart/{chart.id}")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert (body["can_manage"], body["can_share"], body["manage_reason"]) == (
+        True,
+        False,
+        "tenant_admin",
+    )
+    r = harness.post(
+        tam, f"/api/v1/ownership/chart/{chart.id}/shares", {"subject": cleo.ref}
+    )
+    assert r.status_code == 403
+    r = harness.put(
+        tam, f"/api/v1/ownership/chart/{chart.id}/visibility", {"visibility": "public"}
+    )
+    assert r.status_code == 403
+    # And the administrator can do the thing the read was for.
+    r = harness.put(
+        tam, f"/api/v1/ownership/chart/{chart.id}/owner", {"subject": tam.ref}
+    )
+    assert r.status_code == 200, r.get_json()
+    assert harness.row(chart).owner_user_id == tam.id
+
+
+def test_tenant_administrator_reads_an_unowned_object_of_their_tenant(harness):
+    """Issue #102, closed by the same rule: an object whose owner has been
+    deactivated is unreachable for everyone -- and was for the tenant
+    administrator too, who is the one person meant to rescue it. Now the
+    administrator lists and opens it, and claims it from the drawer."""
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x160)
+    harness.set_active(ana, False)
+    try:
+        assert harness.decide(tam, chart).verdict == ALLOW
+        assert harness.decide(cleo, chart).verdict == DENY
+        assert chart.id in harness.listed_ids(tam, "chart")
+        r = harness.get(tam, f"/api/v1/ownership/chart/{chart.id}")
+        assert r.status_code == 200
+        assert r.get_json()["unowned"] is True
+        assert r.get_json()["can_manage"] is True
+        r = harness.post(tam, f"/api/v1/ownership/chart/{chart.id}/claim", {})
+        assert r.status_code == 200, r.get_json()
+        assert harness.row(chart).owner_user_id == tam.id
+    finally:
+        harness.set_active(ana, True)
+
+
+def test_tenant_administrator_does_not_read_an_untenanted_or_foreign_object(harness):
+    """The ground is the ROW's tenant: a row with no tenant mirrored belongs
+    to no tenant, so no administrator reads it on this ground (its owner
+    and the outside-every-tenant callers do, as before); and a row of
+    another tenant is that tenant's administrator's, not this one's."""
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x170)
+    _blank_row_tenant(harness, chart)
+    assert harness.row(chart).tenant_guid is None
+    assert harness.decide(tam, chart).verdict == DENY
+    assert chart.id not in harness.listed_ids(tam, "chart")
+    assert harness.decide(ana, chart).verdict == ALLOW, "the owner, as ever"
+
+    other = harness.create_chart(cleo, "tenant-b-private")
+    harness.drain()
+    assert harness.decide(cleo, other).verdict == ALLOW
+    assert harness.decide(tam, other).verdict == DENY
+    assert other.id not in harness.listed_ids(tam, "chart")
+    assert other.id in harness.listed_ids(cleo, "chart")
+
+
+def test_tenant_administrator_sees_a_members_draft_dashboard(harness):
+    """Stock hides an unpublished dashboard from everyone but its owners;
+    the administrator's list admits their tenant's drafts too (an
+    administrator re-homes a draft as much as a published one), while the
+    public-within-tenant set keeps stock's `published` condition."""
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x180)
+    with harness.ctx():
+        from superset import db
+
+        obj = harness._load(dash)
+        obj.published = False
+        db.session.commit()
+    assert dash.id in harness.listed_ids(tam, "dashboard")
+    assert dash.id not in harness.listed_ids(cleo, "dashboard")
+    # A public draft of Ana's is not in a plain member's list (stock's
+    # rule), but is in the administrator's.
+    amy = harness.add_person(
+        guid(0x183), "Amy180", "Gamma", "sales_readers", f"Tenant_{tenant_a}_Role"
+    )
+    harness.set_visibility(ana, dash, "public")
+    assert dash.id not in harness.listed_ids(amy, "dashboard")
+    assert dash.id in harness.listed_ids(tam, "dashboard")
+
+
+def test_the_administrator_check_is_asked_once_per_request(harness):
+    """`service.administered_tenant` is answered once per user per request
+    (the tile marker asks per tile) and cached for the lookup TTL across
+    requests: many decisions in one request cost one administrator check,
+    and a caller who administers nothing costs one check too, not one per
+    object."""
+    from superset_ownership import service
+
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x190)
+    charts = [chart] + [harness.create_chart(ana, f"many-{i}") for i in range(4)]
+    harness.drain()
+    # The rows first: `harness.row` opens its own app context, which would
+    # detach a user loaded before it.
+    rows = [harness.row(ref) for ref in charts]
+    with harness.acting_as(tam):
+        harness.authorizer.calls.clear()
+        user = harness._user(tam)
+        for row in rows:
+            assert service.tenant_admin_reads(row, user) is True
+        assert [c[0] for c in harness.authorizer.calls].count("user_in_group") == 1
+    with harness.acting_as(ana):
+        harness.authorizer.calls.clear()
+        user = harness._user(ana)
+        for row in rows:
+            assert service.tenant_admin_reads(row, user) is False
+        assert [c[0] for c in harness.authorizer.calls].count("user_in_group") == 1
+
+
+def test_owner_reads_with_no_administrator_check_even_during_an_outage(harness):
+    """Review round 1 of PR #116: the administrator ground sits AFTER the
+    owner fast path. An owner's own read costs no administrator check --
+    and during a store outage, when a failing check is (rightly) never
+    cached, an owner's dashboard is still one zero-call decision per tile."""
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x1B0)
+    d = harness.decide(ana, chart)
+    assert d.verdict == ALLOW
+    assert d.names == ()
+    harness.authorizer.up = False
+    try:
+        for _ in range(2):
+            d = harness.decide(ana, chart)
+            assert d.verdict == ALLOW
+            assert d.names == (), "an owner never asks the store, outage or not"
+    finally:
+        harness.authorizer.up = True
+
+
+def test_tenant_administrator_lists_a_chartless_dashboard(harness):
+    """A dashboard with no chart has no dataset to grant on; stock's inner
+    join drops it from the public set (as stock itself does), but the
+    administrator's set admits it -- an empty dashboard is re-homed too."""
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x1C0)
+    empty = harness.create_dashboard(ana, title="empty-1c0")
+    harness.drain()
+    assert empty.id in harness.listed_ids(tam, "dashboard")
+    assert empty.id not in harness.listed_ids(cleo, "dashboard")
+    assert harness.decide(tam, empty).verdict == ALLOW
+
+
+def test_a_negative_administrator_answer_is_not_shared_across_requests(harness):
+    """A "no" is request-local: a member made administrator between two
+    requests is one on the second, not after the TTL. (A "yes" is shared
+    and outlives a revocation by at most the TTL -- documented.)"""
+    from superset_ownership.identity import tenant_role_name
+
+    tenant_a = guid(0xA)
+    ana = harness.add_person(
+        guid(0x1D0), "Ana1d0", "Gamma", "sales_readers", tenant_role_name(tenant_a)
+    )
+    tia = harness.add_person(
+        guid(0x1D1), "Tia1d0", "Gamma", "sales_readers", tenant_role_name(tenant_a)
+    )
+    chart = harness.create_chart(ana, "grant-later")
+    harness.drain()
+    assert harness.decide(tia, chart).verdict == DENY
+    assert chart.id not in harness.listed_ids(tia, "chart")
+    harness.authorizer.make_tenant_administrator(tia.ref, tenant_a)
+    assert harness.decide(tia, chart).verdict == ALLOW, "seen on the next request"
+    assert chart.id in harness.listed_ids(tia, "chart")
+
+
+def test_ownership_list_route_scopes_the_administrator_from_the_rows(harness):
+    """`_visibility_scope` used to make an uncached administrator check and
+    a `tenant_objects` store read per request, and scoped by the store's
+    tenant tuples while the read gate used the row's mirrored tenant. Now
+    both answer from the row: one cached administrator check, no
+    `tenant_objects` read, and the listed set is the readable set."""
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x1E0)
+    harness.authorizer.calls.clear()
+    r = harness.get(tam, "/api/v1/ownership/charts?limit=100")
+    assert r.status_code == 200
+    ids = {item["object_id"] for item in r.get_json()["result"]}
+    assert chart.id in ids
+    names = [c[0] for c in harness.authorizer.calls]
+    assert "tenant_objects" not in names
+    assert names.count("user_in_group") <= 1
+    row = next(i for i in r.get_json()["result"] if i["object_id"] == chart.id)
+    assert (row["can_manage"], row["can_share"]) == (True, False)
+    r = harness.get(cleo, "/api/v1/ownership/charts?limit=100")
+    assert chart.id not in {item["object_id"] for item in r.get_json()["result"]}

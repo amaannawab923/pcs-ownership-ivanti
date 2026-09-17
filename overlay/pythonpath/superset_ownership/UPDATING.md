@@ -25,6 +25,10 @@ module's own changes (the repository-wide `UPDATING.md` at the repo root
 covers Superset core only); this file is the module-local equivalent,
 scoped to `docker/pythonpath_dev/superset_ownership/`.
 
+## A tenant administrator reads every object of their tenant (PCS-10243)
+
+A tenant administrator now lists, opens and loads the data of every governed object of their own tenant -- private, shared, public or unowned -- decided from the ownership row's mirrored tenant (revision 0004) and one administrator check per user per request (cached for `OWNERSHIP_LOOKUP_CACHE_TTL` seconds, the same cache `OWNERSHIP_IS_TENANT_ADMINISTRATOR` uses), with no store call on the object. Before, an object not shared with the administrator was hidden from them -- and an object hidden is one they cannot transfer, take or claim: the row to act on was not there (issue #102 for the unowned case). Private now means "the owner, whoever it is shared with, and the tenant's administrators"; nothing about sharing changes: only the owner (or a holder of the manage-sharing permission) changes who else sees it, and the administrator's drawer still offers transfer and take-ownership only. Another tenant's administrator sees nothing, as before. A row with no tenant mirrored (created before revision 0004, or not yet stamped) is nobody's tenant: no administrator reads it on this ground, so until `backfill-tenants` has run the administrator sees only what they saw before; `check` lists the public ones (`untenanted_public`). The administrator check is cached per user: a newly granted administrator reads on their next request, a revoked one for at most `OWNERSHIP_LOOKUP_CACHE_TTL` seconds more. The administrator's list includes their tenant's draft dashboards (stock hides drafts from everyone but their owners; an administrator re-homes a draft too). Requires revision 0004 (`superset ownership db upgrade`) and stamped rows (`backfill-tenants`).
+
 ## The id shapes are Neurons' (PCS-10243, confirmed by Ivanti)
 
 Ivanti confirmed how Neurons provisions users and writes to OpenFGA; the module's defaults now match, so pointing it at their store needs no hook for any of the three.

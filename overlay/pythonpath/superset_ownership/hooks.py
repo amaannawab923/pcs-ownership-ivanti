@@ -384,14 +384,24 @@ def raise_for_access_bypass(
         # it is the owner's ABSENCE that changes, not the object's audience.
         return service.public_row_visible_to(row, _acting_user(user_id))
 
+    if row.owner_user_id == user_id:
+        return True  # owner fast path, zero store calls -- before anything else
+
+    if service.tenant_admin_reads(row, _acting_user(user_id)):
+        # A tenant administrator reads every object of their tenant,
+        # private, shared or unowned: they can transfer it, take it or claim
+        # it, so hiding it only hid the row they need to click on (and left
+        # an object whose owner had gone unreachable from the UI, #102).
+        # From the row's mirrored tenant, one cached administrator check --
+        # AFTER the owner fast path (review round 1 of PR #116): an owner's
+        # own read stays zero store calls, and readable through an outage.
+        return True
+
     if is_unowned(row):
         # Owner deactivated. The object falls back to administrators, who
         # reach it through Superset's own is_admin check further down; we
         # grant nobody, and existing shares stop conferring access.
         return False
-
-    if row.owner_user_id == user_id:
-        return True  # owner fast path, zero FGA calls
 
     # Split out to keep this function's own cyclomatic complexity within the
     # repo's ruff C901 budget (issue #93 added the private-deny branch below,
@@ -502,17 +512,25 @@ def _query_filter(asset_type: str, user_id: int) -> list[int]:
     # caller may see are OR'd back in here -- decided in SQL, the way stock
     # decides public objects, never by loading them (a tenant's whole public
     # set is unbounded; the owned/shared set above is not).
+    user = _acting_user(user_id)
+    in_sql: list[int] = []
     if service.public_is_tenant_scoped():
-        public_ids = _public_ids_in_sql(asset_type, _acting_user(user_id))
-        if 0 < len(public_ids) <= _SEED_LIMIT:
+        in_sql.extend(_public_ids_in_sql(asset_type, user))
+    # A tenant administrator: every governed object of their tenant, the
+    # same way -- one statement, drafts included (an administrator re-homes
+    # a draft too), the dataset grant applied as for anything else.
+    in_sql.extend(_administered_ids_in_sql(asset_type, user))
+    if in_sql:
+        in_sql = sorted(set(in_sql))
+        if len(in_sql) <= _SEED_LIMIT:
             # One more statement, so the per-row lookups the list page makes
             # while rendering (`extra_editors`, the tile marker) are served
             # from the request cache instead of costing one SELECT each.
             # Capped: a page renders at most 100 rows, and a large tenant's
-            # whole public set is not worth a seed on every request (FAB
-            # applies this filter to a single-object GET as well).
-            service.lookup_many(asset_type, public_ids)
-        ids.extend(public_ids)
+            # whole set is not worth a seed on every request (FAB applies
+            # this filter to a single-object GET as well).
+            service.lookup_many(asset_type, in_sql)
+        ids.extend(in_sql)
     return ids
 
 
@@ -521,14 +539,48 @@ _SEED_LIMIT = 200
 
 def _public_ids_in_sql(asset_type: str, user: Any) -> list[int]:
     """The public objects of this caller's tenant that Superset's own
-    no-viewer rule would list: stock's `no_viewer_query` restated -- the
-    dataset grant through `get_dataset_access_filters`, `published` for a
-    dashboard -- intersected with the tenancy rule as a subquery on the
-    ownership rows (`service.public_object_ids_visible_to`). One statement
-    whatever the tenant's size; no model is loaded and no per-object
-    permission check runs. The dataset grant is evaluated here exactly as
-    stock evaluates it for the same objects under instance scope, and again
-    on access by `raise_for_access_bypass` (`base_permission_holds`).
+    no-viewer rule would list -- `_ids_in_sql` over
+    `service.public_object_ids_visible_to`, with stock's `published`
+    condition. Kept as the named entry point the tests and the docs use."""
+    return _ids_in_sql(
+        asset_type,
+        service.public_object_ids_visible_to(asset_type, user),
+        published_only=True,
+    )
+
+
+def _administered_ids_in_sql(asset_type: str, user: Any) -> list[int]:
+    """Every governed object of the tenant this caller administers that the
+    dataset grant lets them list (`service.administered_object_ids`);
+    empty for a caller who administers no tenant."""
+    administered = service.administered_object_ids(asset_type, user)
+    if administered is None:
+        return []
+    return _ids_in_sql(
+        asset_type, administered, published_only=False, include_chartless=True
+    )
+
+
+def _ids_in_sql(
+    asset_type: str,
+    candidate_ids: Any,
+    *,
+    published_only: bool,
+    include_chartless: bool = False,
+) -> list[int]:
+    """The objects among `candidate_ids` (a selectable of ownership-row
+    object ids) that Superset's own no-viewer rule would list: stock's
+    `no_viewer_query` restated -- the dataset grant through
+    `get_dataset_access_filters`, and with `published_only`, `published`
+    for a dashboard -- intersected with the ownership rule as a subquery.
+    With `include_chartless`, a dashboard with no chart is listed too
+    (stock's inner join drops it; a tenant administrator re-homes an
+    empty dashboard as much as a full one).
+    One statement whatever the tenant's size; no model is loaded and no
+    per-object permission check runs. The dataset grant is evaluated here
+    exactly as stock evaluates it for the same objects under instance
+    scope, and again on access by `raise_for_access_bypass`
+    (`base_permission_holds`).
 
     The `~has_viewers` clause of stock's query is deliberately absent: the
     sentinel is a viewer, and its whole purpose is to route these objects
@@ -540,23 +592,35 @@ def _public_ids_in_sql(asset_type: str, user: Any) -> list[int]:
     from superset.models.slice import Slice
     from superset.utils.filters import get_dataset_access_filters
 
-    public_ids = service.public_object_ids_visible_to(asset_type, user)
     grant = get_dataset_access_filters(
         Slice, security_manager.can_access_all_datasources()
     )
     if asset_type == "dashboard":
         from superset.models.dashboard import Dashboard
 
+        conditions = [Dashboard.id.in_(candidate_ids)]
+        if include_chartless:
+            from sqlalchemy import or_
+
+            conditions.append(or_(Slice.id.is_(None), grant))
+        else:
+            conditions.append(grant)
+        if published_only:
+            conditions.append(Dashboard.published.is_(True))
         query = (
             db.session.query(Dashboard.id)
             .join(Dashboard.slices, isouter=True)
-            .join(SqlaTable, Slice.datasource_id == SqlaTable.id)
-            .join(Database, SqlaTable.database_id == Database.id)
-            .filter(
-                Dashboard.id.in_(public_ids),
-                Dashboard.published.is_(True),
-                grant,
+            .join(
+                SqlaTable,
+                Slice.datasource_id == SqlaTable.id,
+                isouter=include_chartless,
             )
+            .join(
+                Database,
+                SqlaTable.database_id == Database.id,
+                isouter=include_chartless,
+            )
+            .filter(*conditions)
             .distinct()
         )
     else:
@@ -564,7 +628,7 @@ def _public_ids_in_sql(asset_type: str, user: Any) -> list[int]:
             db.session.query(Slice.id)
             .join(SqlaTable, Slice.datasource_id == SqlaTable.id)
             .join(Database, SqlaTable.database_id == Database.id)
-            .filter(Slice.id.in_(public_ids), grant)
+            .filter(Slice.id.in_(candidate_ids), grant)
         )
     return [row[0] for row in query.all()]
 

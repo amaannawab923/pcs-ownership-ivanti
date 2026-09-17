@@ -143,6 +143,97 @@ def public_row_visible_to(row: "OwnershipRow", user: Any) -> bool:
     )
 
 
+_ADMINISTERED_TENANT_SETTING = "superset_ownership.administered_tenant"
+_NO_TENANT = ""  # cached "administers nothing": distinct from a cache miss
+
+
+def administered_tenant(user: Any) -> Optional[str]:
+    """The tenant this caller administers (normalised GUID), or None.
+
+    The read gate's tenant-administrator ground: an administrator reads
+    every object of their own tenant (`tenant_admin_reads`). Answered once
+    per user per request, and for OWNERSHIP_LOOKUP_CACHE_TTL seconds across
+    requests through the hook cache -- the same cache and TTL
+    `OWNERSHIP_IS_TENANT_ADMINISTRATOR` uses -- because the dashboard tile
+    marker asks per tile and the default `is_tenant_administrator` is one
+    store check per call. Only a "yes" reaches the shared layer: a "no" is
+    request-local, so a freshly granted administrator is recognised on their
+    next request rather than after the TTL (a revoked one keeps reading for
+    at most the TTL, which is what the TTL bounds -- see the setting's
+    doc). The flip side, by design: a caller who administers nothing pays
+    one administrator check per request on any route that asks (the read
+    gate's owner fast path comes first, so an owner's own reads never do);
+    a shared negative would save that check at the price of a grant taking
+    the TTL to show. Fails closed (None) on an identity or directory
+    error, which is logged; a failure is never cached.
+    """
+    user_id = getattr(user, "id", None)
+    if user is None or user_id is None:
+        return None
+    from superset_ownership import plugin_hooks
+
+    cached = plugin_hooks.cache_get(_ADMINISTERED_TENANT_SETTING, "user", user_id)
+    if cached is not plugin_hooks.MISS:
+        return cached or None
+    from superset_ownership.api import is_tenant_administrator
+    from superset_ownership.identity import resolve_tenant_guid
+
+    try:
+        tenant = normalize_tenant(resolve_tenant_guid(user))
+    except Exception:  # noqa: BLE001 - identity seam (I-2): fail closed, say so
+        logger.exception(
+            "superset_ownership: identity plug-in raised resolving the tenant of "
+            "user %s; treated as administering no tenant for this request",
+            user_id,
+        )
+        return None
+    try:
+        answer = tenant if tenant and is_tenant_administrator(user) else None
+    except Exception:  # noqa: BLE001 - is_tenant_administrator logged it; fail closed
+        return None
+    plugin_hooks.cache_set(
+        _ADMINISTERED_TENANT_SETTING,
+        "user",
+        user_id,
+        answer or _NO_TENANT,
+        shared=answer is not None,
+    )
+    return answer
+
+
+def tenant_admin_reads(row: "OwnershipRow", user: Any) -> bool:
+    """May this caller read the object because they administer its tenant?
+
+    From the row alone (revision 0004's mirrored tenant), zero store calls
+    beyond the cached administrator check: the row's tenant must be set and
+    be the caller's administered tenant. Whatever the visibility -- private,
+    shared, public, and unowned -- an administrator sees every object of
+    their tenant, so they can re-home it (transfer, take ownership, claim);
+    only the owner decides who ELSE sees it (`_sharing_ground`). An
+    untenanted row is nobody's tenant, so no administrator reads it here
+    (the claim path for an unowned untenanted object is `_tenant_admin_
+    reason`'s, unchanged). The dataset grant is the caller's to check first.
+    """
+    tenant = normalize_tenant(getattr(row, "tenant_guid", None))
+    if not tenant:
+        return False
+    return administered_tenant(user) == tenant
+
+
+def administered_object_ids(asset_type: str, user: Any):
+    """A selectable of the `object_id`s of every governed row in the tenant
+    this caller administers -- `tenant_admin_reads` stated in SQL for the
+    list filter -- or None when the caller administers no tenant."""
+    tenant = administered_tenant(user)
+    if not tenant:
+        return None
+    return select(ownership_object.c.object_id).where(
+        ownership_object.c.asset_type == asset_type,
+        ownership_object.c.tenant_guid == tenant,
+        ownership_object.c.visibility.in_(enforced_visibilities()),
+    )
+
+
 def set_row_tenant(
     asset_type: str,
     object_uuid: Optional[str],
@@ -262,6 +353,14 @@ def _db() -> "SQLAlchemy":
 # request populating an entry that another tenant's request reads is correct
 # by construction -- there is nothing tenant- or user-specific in the value.
 # Access decisions are made on top of the row, per request, by the hooks.
+#
+# The same TTL also bounds the one per-USER answer this module caches, the
+# administered tenant (`administered_tenant`): a "yes" is served from the
+# shared layer for up to OWNERSHIP_LOOKUP_CACHE_TTL seconds after the
+# administrator relation is revoked, and nothing invalidates it earlier --
+# so this setting is the longest a former tenant administrator keeps
+# reading the tenant's objects. A "no" is never shared. Size it with that in
+# mind (10 s by default); 0 turns the shared layer off for both.
 #
 # INVALIDATION is explicit and happens TWICE per write, on either side of the
 # commit. Every write to `ownership_object` / `ownership_share` in this

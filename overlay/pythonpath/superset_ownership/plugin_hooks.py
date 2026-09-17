@@ -344,6 +344,31 @@ def _cache_key(setting: str, key: Any) -> str:
     return f"superset_ownership:hook:{setting}:{key}"
 
 
+# The sentinel `cache_get` returns for "nothing cached" -- compare with
+# `is`, never with `==`; a cached value of None/""/0 is a real answer.
+MISS = _MISS
+
+
+def cache_get(setting: str, scope: CacheScope, key: Any) -> Any:
+    """The hook cache (request-local, then the shared TTL layer) for a
+    caller outside this module: `MISS` when nothing is cached."""
+    return _cache_get(setting, scope, key)
+
+
+def cache_set(
+    setting: str, scope: CacheScope, key: Any, value: Any, *, shared: bool = True
+) -> None:
+    """Record `value`: request-locally always, and in the shared TTL layer
+    unless `shared=False` (a caller keeping a negative answer to this
+    request only, so a grant made after it is seen on the next request)."""
+    if shared:
+        _cache_set(setting, scope, key, value)
+        return
+    local = _request_local()
+    if local is not None:
+        local[(setting, key)] = value
+
+
 def _cache_get(setting: str, scope: CacheScope, key: Any) -> Any:
     local = _request_local()
     local_key = (setting, key)

@@ -950,7 +950,10 @@ def _default_manage_reason(row, user) -> str | None:
     decides whether an object can be OPENED or LISTED
     (`hooks.raise_for_access_bypass`, the list filters): managing an
     object's sharing and reading the object are different questions, and a
-    rule added here widens only the first.
+    rule added here widens only the first. The read gate has its own
+    tenant-administrator ground (`service.tenant_admin_reads`, from the
+    row's mirrored tenant), so an administrator can reach what this seam
+    lets them re-home; it is decided there, not here.
     """
     from superset import security_manager
 
@@ -1206,16 +1209,23 @@ def _visibility_scope(asset_type: str, user, rows: dict):
         return None, True, set()
 
     tenant_uuids: set[str] = set()
-    if is_tenant_administrator(user):
-        from superset_ownership.identity import resolve_tenant_guid
-
-        caller_tenant = resolve_tenant_guid(user)
-        if caller_tenant:
-            # One request for the whole tenant, not one per object.
-            tenant_uuids = set(
-                get_authorizer().tenant_objects(caller_tenant, asset_type)
-            )
-        scope = {r.object_id for r in rows.values() if r.object_uuid in tenant_uuids}
+    # The administered tenant, cached per user (`service.administered_
+    # tenant`, the read gate's own answer); the tenant's objects from the
+    # rows' mirrored tenant, the same source the read gate decides by -- so
+    # what this route lists is exactly what the administrator can open,
+    # with no store request for the tenant's objects (review round 1 of
+    # PR #116: this used to be an uncached administrator check plus a
+    # `tenant_objects` read per request, keyed on the store's tuples).
+    caller_tenant = service.administered_tenant(user)
+    if caller_tenant:
+        scope: set[int] = set()
+        for r in rows.values():
+            if (
+                r.object_uuid
+                and service.normalize_tenant(r.tenant_guid) == caller_tenant
+            ):
+                tenant_uuids.add(r.object_uuid)
+                scope.add(r.object_id)
         # Their own tenant's objects, plus the public objects they may see
         # and anything reaching them.
         scope |= _public_scope_ids(rows, user)

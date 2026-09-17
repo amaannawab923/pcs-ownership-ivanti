@@ -581,12 +581,11 @@ Steps: `POST .../claim` as the holder.
 Expected: `403 {"message": "the manage-sharing permission does not include claiming ownership"}` (`api.py:2943-2946`).
 Result: BLOCKED — same environment dependency as OWN-026/078/079: `OWNERSHIP_MANAGE_PERMISSION` is not configured, so no holder exists to exercise this path. Not exercised.
 
-**OWN-083 — Tenant administrator "rescues" an unowned governed object — backend allows it, UI does not (open issue #102)**
-Preconditions: chart 83 unowned (or any object with `owner_user_id is None`), tenant-stamped to A or untenanted.
-Steps (API): As Ada (tenant A admin), `GET /chart/83` — expect `can_manage: true, manage_reason: "tenant_admin"` (granted via `_is_claimable(row)` in `_tenant_admin_reason`, `api.py:961-985`); then `POST /chart/83/claim` — expect `200`, Ada becomes owner.
-Steps (UI): As Ada, look for chart 83 in the Chart List and try to open its Sharing drawer from there.
-Expected: the API steps succeed exactly as described (the backend genuinely grants a tenant administrator the right to see and claim an unowned object in their tenant). The UI steps are expected to FAIL to surface the object at all — Superset's own list/detail read gate denies everyone (including the tenant admin) on an unowned object because the ownership plugin's read gate treats "no owner" the same as "no one may open it" for the purposes of the underlying Superset access check, so the object never appears in the tenant admin's list or dashboard/chart view even though the ownership API itself would grant `can_manage: true` if reached directly. This is the exact gap tracked as **open issue #102**. Record both results — the discrepancy IS the expected/documented behavior right now, not a new finding.
-Result: OBSERVED (tracked against #102, not a new finding) — API steps matched exactly: GET /chart/83 as Ada returned can_manage: true, manage_reason: "tenant_admin"; POST /chart/83/claim returned 200 and made Ada owner (then released back to null via API to re-test the UI half and restore seeded state). UI steps, via the browser as Ada: chart 83 DID surface in the Chart List (row "Pivot Table v2", Owner "Unknown", Sharing "Public") — not a full "never appears", slightly more visible than this case's literal wording predicts — but the row's Actions column offered no icons at all (no Sharing/edit entry point, confirmed via zoomed screenshot), so the drawer itself is unreachable from the list exactly as the case describes. Opening the chart directly via its Explore link did render full chart data for Ada despite the unowned/ungoverned state. Net: management remains unreachable through the UI (the core #102 gap), though list-row visibility is looser than the case's "never appears" phrasing. Chart 83 confirmed unowned/public afterward (seeded state).
+**OWN-083 — Tenant administrator rescues an unowned governed object from the UI (issue #102, closed by PR #116)**
+Preconditions: chart 83 unowned (`owner_user_id is None`, e.g. released with `PUT /chart/83/owner {"subject": null}`), tenant-stamped to A.
+Steps (API): As Ada (tenant A admin), `GET /chart/83` — expect `can_manage: true, manage_reason: "tenant_admin", unowned: true`. Steps (UI): As Ada, find chart 83 in the Chart List, open its Sharing drawer, click **Assign owner to me**. As Cleo (tenant B admin), look for it.
+Expected: the row is in Ada's Chart List (Owner "Unknown") with the **Sharing** action available; the drawer says the object has no owner and offers **Assign owner to me**; after it, Ada is the owner and the sharing controls are live. The chart itself opens for Ada (Explore renders data). Cleo does not see the row and gets `404` on `GET /api/v1/chart/83`. Before PR #116 the row surfaced with no actions and the object could not be opened; a tenant administrator now reads every object of their tenant.
+Result:
 
 **OWN-084 — Claim refused for someone who is not owner/tenant-admin/admin**
 Preconditions: chart 83 unowned; Ben (plain tenant-A member) attempts to claim.
@@ -1007,6 +1006,42 @@ Steps: `docker exec pcssetup-superset-1 sh -c 'echo y | superset ownership teard
 Expected: teardown's JSON reports `tables_dropped` (the three tables) and `chain_forgotten: true`; `db upgrade` logs `Running upgrade -> 0001_object_ownership` through `0004_ownership_object_tenant` (the chain runs from the start, not a no-op); `db current` shows `0004_ownership_object_tenant`; after the restart `check` is `ok: true` with every object backfilled public again.
 Result:
 
+## 16. A tenant administrator reads every object of their tenant (PR #116)
+
+**OWN-151 — A member's PRIVATE object is listed, opens and loads its data for the tenant administrator; not for the other tenant's**
+Preconditions: Ben (tenant A) owns a chart on a dashboard; as Ben, `PUT /chart/<id>/visibility {"visibility": "private"}`. Ada administers tenant A, Cleo tenant B.
+Steps: As Ada: Charts list; open the chart in Explore; `POST /api/v1/chart/data` for it; `GET /api/v1/chart/<id>` and `GET /api/v1/ownership/chart/<id>`. Repeat as Cleo and as Marcus (a plain tenant A member).
+Expected: Ada: the row is in her list with Sharing "Private"; Explore renders the data; `200` on the chart data, the native GET and the ownership GET (`can_manage: true, can_share: false, manage_reason: "tenant_admin"`). Cleo and Marcus: not in the list, `404` on both GETs, `403` on the chart data. The dashboard the chart sits on behaves the same (list, open, tile renders for Ada; placeholder/404 for Cleo).
+Result:
+
+**OWN-152 — Reading is not sharing: the administrator's drawer on the private object**
+Steps: As Ada, row action **Sharing** on Ben's private chart.
+Expected: the drawer opens (it used to be unreachable: no row) with the notice "You are not the owner of this object; Ben tenant A is. As an administrator of this tenant you can transfer its ownership, but only its owner can change how it is shared. To change the sharing, take ownership first."; Private is selected and all three options are greyed out; **Take ownership** and **Transfer ownership** are offered. API: `POST .../shares` and `PUT .../visibility` as Ada answer `403` "take ownership of it first"; `PUT .../owner {"subject": "<Ada>"}` answers `200`.
+Result:
+
+**OWN-153 — A member's DRAFT (unpublished) dashboard is in the administrator's list**
+Preconditions: a tenant A member creates a dashboard and leaves it unpublished (Draft).
+Steps: As Ada, Dashboards list. As another plain tenant A member, Dashboards list.
+Expected: Ada sees the draft (an administrator re-homes a draft too); the plain member does not (stock hides drafts from everyone but their owners, unchanged). Cleo does not see it.
+Result:
+
+**OWN-154 — An object with no tenant on its row is not read on the administrator ground**
+Preconditions: a tenant A member's private chart; blank its row's tenant in the metadata DB (`UPDATE ownership_object SET tenant_guid = NULL WHERE asset_type='chart' AND object_id=<id>`), restart or wait for the lookup TTL.
+Steps: As Ada, list and `GET /api/v1/chart/<id>`. Then `superset ownership backfill-tenants` and repeat.
+Expected: before the stamp: not listed, `404` (a row with no tenant is nobody's tenant; the owner still opens it). After `backfill-tenants` stamps it from the owner's tenant: listed and `200` for Ada.
+Result:
+
+**OWN-155 — The administrator check is cached per user: a fresh grant is seen on the next request, a revocation within the TTL**
+Preconditions: Priya (tenant A member, not an administrator); Ben's private chart. Store id from `store.env`.
+Steps: (1) As Priya, `GET /api/v1/chart/<id>` → `404`. (2) Write `user:<A>.<priya> admin tenant:<A>` through the OpenFGA API (`/write`). (3) Repeat (1) immediately. (4) Delete the tuple. (5) Repeat (1) immediately and again after `OWNERSHIP_LOOKUP_CACHE_TTL` seconds (10 by default).
+Expected: (1) `404`. (3) `200` on the very next request (a negative answer is never cached across requests). (5) `200` while the cached positive holds, `404` once the TTL has passed. Nothing about this touches the object's own row cache.
+Result:
+
+**OWN-156 — Cost: the administrator's decisions are from the row, one administrator check per request**
+Steps: With the OpenFGA changelog or server logs visible (or `superset ownership plugin verify --tenant <A> --object <a private chart uuid> --as <Ada's guid>`), open a dashboard of ~10 private charts of another member as Ada.
+Expected: no `check` on any of the objects (the ground is the row's mirrored tenant); one `admin` check on `tenant:<A>` for the request (then none while the cached answer holds); the owner's own reads make no administrator check at all, and remain readable with the store down.
+Result:
+
 ## Coverage map
 
 | Area | Case IDs |
@@ -1015,6 +1050,7 @@ Result:
 | 13. Public within the tenant | OWN-136 – OWN-142 |
 | 14. Tenant administrator: transfer, not sharing | OWN-143 |
 | 15. Neurons id shapes | OWN-144 – OWN-150 |
+| 16. Tenant administrator reads their tenant | OWN-151 – OWN-156 |
 | 2. Visibility state machine (dashboards & charts) | OWN-010 – OWN-027 |
 | 3. Sharing (+ OWN-135 walkthrough) | OWN-028 – OWN-055, OWN-135 |
 | 4. Placeholder tile & data path | OWN-056 – OWN-067 |
@@ -1027,9 +1063,9 @@ Result:
 | 11. Monitoring (OpenFGA API + SQL Lab) | OWN-119 – OWN-124 |
 | 12. Negative / edge cases | OWN-125 – OWN-134 |
 
-**Total: 150 cases.**
+**Total: 156 cases.**
 
 ## Known open issues (do not report these as new findings — track against the linked issue instead)
 
 - **#99 — OPEN.** Upstream Superset-core proposal: give `EXTRA_ACCESS_QUERY_FILTERS`/the list `BaseFilter` hook the object id on a single-item GET, so an ownership check can answer "is this user allowed to see this specific object" without a reverse-index (`list_objects`) computation. Follow-up to the now-closed #82 (owner requests paying one `list_objects` call). Out of scope for this plugin's own PR series; filed as a Superset-core issue. Not independently testable from this document — it is a proposal, not a behavior change.
-- **#102 — OPEN.** A tenant administrator can, via the raw ownership API, see and claim an unowned governed object in their own tenant (`can_manage: true`, `POST .../claim` succeeds) — but cannot reach it through the UI at all, because Superset's own list/detail read gate denies everyone (tenant admin included) on an unowned object, so it never appears in the tenant admin's Chart/Dashboard list or opens the Sharing drawer's rescue action. Only a Superset admin (who bypasses the read gate entirely) can currently reach it from the UI. See **OWN-083**, which exercises exactly this gap and documents the expected (not yet fixed) discrepancy between the API and UI behavior. Probable fix per the issue: let a tenant administrator's list/GET read (not data-path) an unowned governed object of their own tenant, using the same `manage_reason` decision that already grants `can_manage`.
+- **#102 — CLOSED by PR #116.** A tenant administrator now reads (lists, opens, loads the data of) every object of their own tenant, private, shared, public or unowned, so the unowned object is reachable from the UI and claimable from the Sharing drawer. See OWN-083 and section 16.

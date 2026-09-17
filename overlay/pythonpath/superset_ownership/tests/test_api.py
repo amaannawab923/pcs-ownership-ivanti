@@ -1524,8 +1524,9 @@ def test_list_makes_one_tenant_request_for_a_tenant_admin_holding_the_role(
     superset_stub, authz, monkeypatch, four_charts
 ):
     # The holder branch is for callers the broader grounds do not cover: a
-    # tenant administrator's page already made the tenant-objects request,
-    # and must not make it again for the role they also hold.
+    # tenant administrator's page is scoped from the rows' mirrored tenant
+    # (PR #116 -- no tenant-objects request at all), and must not make one
+    # for the role they also hold either.
     rows, assets = four_charts
     monkeypatch.setenv(api.MANAGE_PERMISSION_CONFIG_KEY, MANAGE_ROLE)
     authz.user_in_group.return_value = True
@@ -1540,7 +1541,7 @@ def test_list_makes_one_tenant_request_for_a_tenant_admin_holding_the_role(
 
     assert set(listed) == {1, 2, 3}
     assert all(listed[i]["can_manage"] for i in (1, 2, 3))
-    authz.tenant_objects.assert_called_once_with(TENANT_A, "chart")
+    authz.tenant_objects.assert_not_called()
 
 
 def test_list_with_can_manage_hook_makes_no_per_row_store_calls(
@@ -1549,8 +1550,9 @@ def test_list_with_can_manage_hook_makes_no_per_row_store_calls(
     """M-3: a configured OWNERSHIP_CAN_MANAGE hook used to cost one
     `object_tenant` store round trip AND one `list_shares` query PER ROW
     (an N+1 for a page). `object_state["tenant"]` is now built from data the
-    list handler already computed (`tenant_uuids`, from the ONE
-    `tenant_objects` call this tenant-administrator page already makes),
+    list handler already computed (`tenant_uuids`, from the rows' mirrored
+    tenant -- PR #116; before that from the one `tenant_objects` call the
+    page made),
     and `object_state["shares"]` from ONE batched query for the whole page
     -- not four `object_tenant` calls and four share queries for these four
     rows."""

@@ -117,7 +117,11 @@ Five rules apply to every hook (the contract's §4.5.1 has the full text):
    computation instead.
 4. **Caching**: `OWNERSHIP_MEMBER_GUID`, `OWNERSHIP_TENANT_GUID` and
    `OWNERSHIP_IS_TENANT_ADMINISTRATOR` are cached per user for
-   `OWNERSHIP_LOOKUP_CACHE_TTL` seconds, keyed by user id --
+   `OWNERSHIP_LOOKUP_CACHE_TTL` seconds, keyed by user id (so is the
+   module's own "which tenant does this user administer" answer that the
+   read gate uses, cache key `superset_ownership:hook:superset_ownership.administered_tenant:<user id>`:
+   a positive answer outlives a revocation by at most that TTL; a
+   negative one is never cached across requests) --
    `OWNERSHIP_DISPLAY_NAME` and `OWNERSHIP_USER_FOR_MEMBER_GUID` are NOT
    cached. A directory hook (`_OF_TENANT`/`_OF_GROUP`) is cached for
    `OWNERSHIP_DIRECTORY_GROUP_WALK_TTL` seconds (on a Neurons store, which

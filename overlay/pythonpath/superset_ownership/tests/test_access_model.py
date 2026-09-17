@@ -301,9 +301,12 @@ def test_tenant_administrator_manages_own_tenant_only(harness):
     object's sharing is its owner's alone: a share or a visibility change by
     Tam is refused (403) until Tam has taken ownership, so a change of
     sharing can only ever have been made by the name on the owner line.
-    Tam cannot see or manage Bo's object in tenant B. Managing is not
-    viewing: the read gate does not know tenant administrators, so Tam's
-    decision on either object is an ordinary non-owner denial."""
+    Tam cannot see or manage Bo's object in tenant B. A tenant
+    administrator READS every object of their own tenant (private, shared
+    or unowned) so the object they may re-home is reachable -- from the
+    row's mirrored tenant and one cached administrator check, never a
+    store `check` -- and remains an ordinary non-owner, denied, on the
+    other tenant's."""
     w = harness.world
     tenant_a, tenant_b = guid(0xA), guid(0xB)
     role_a, role_b = f"tenant_{tenant_a}", f"tenant_{tenant_b}"
@@ -379,11 +382,10 @@ def test_tenant_administrator_manages_own_tenant_only(harness):
     assert harness.row(own).owner_user_id == ana.id
     harness.drain()  # the transfer's owner-tuple revocation, delivered
     d = harness.decide(tam, own)
-    assert (d.verdict, d.names) == (DENY, ("check",)), (
-        "manage is not view -- Amy's share is viewer, not editor, so M-3's "
-        "lazy object_tenant read (review round 2, PR #100) is never reached "
-        "on this ordinary read decision (the manage-permission resolution "
-        "above is a separate call site, unaffected by M-3)"
+    assert d.verdict == ALLOW, "Tam administers tenant A: reads Ana's object"
+    assert "check" not in d.names, (
+        "the administrator ground is decided from the row's tenant and the "
+        "administrator check, never by asking the store about the object"
     )
 
     # cross-tenant: invisible and unmanageable
