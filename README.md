@@ -11,12 +11,211 @@ wires itself in through Superset's config hooks; the frontend is an overlay
 applied before `npm run build`; OpenFGA runs as its own compose project so
 it survives every rebuild and teardown of the PCS stack.
 
-Where this lives: development happens on the `pcs-package` branch of the
-internal repo (`amaannawab923/client-test`; `pcs-setup` there is the older
-overlay-only delivery). **https://github.com/amaannawab923/pcs-ownership-ivanti**
-is a snapshot of that branch, published so it can be cloned and tested
-without access to the internal repo. The stock Preset PCS source is never
-part of either -- it is fetched when you build.
+## Two ways to use this
+
+**A. Try it, with everything provided.** The `setup.sh` / seed path below
+builds the image, starts an OpenFGA of its own, and seeds a two-tenant
+world you can log into in about twenty minutes. Nothing to configure and
+nothing of yours is touched. Start at [Quick setup](#quick-setup).
+
+**B. Point it at your own OpenFGA.** If you already run OpenFGA and want
+this feature against *your* store, your users and your groups, skip the
+demo entirely: [Bring your own OpenFGA](#bring-your-own-openfga). You need
+the wheel, one config file, and about ten minutes.
+
+The stock Preset PCS source is never part of this repository -- it is
+fetched when you build.
+
+## Bring your own OpenFGA
+
+You need: a Preset PCS (or Superset) build you can add a wheel to, an
+OpenFGA you can reach over HTTP, and permission to write an authorization
+model into a store there. A fresh store is easiest; an existing store with
+your own types in it also works -- step 2 merges rather than replaces.
+
+### 1. Install the wheel and the one config file
+
+```bash
+packaging/build-wheel.sh            # -> dist/superset_ownership-*.whl
+pip install dist/superset_ownership-*.whl
+```
+
+Put `overlay/pythonpath/superset_config_ownership.py` on your PYTHONPATH --
+one file, never a directory mounted over an existing PYTHONPATH entry --
+and call it from your `superset_config_docker.py`:
+
+```python
+from superset_config_ownership import configure
+configure(globals())
+```
+
+That call is the whole wiring: it registers the feature flag, the access
+hooks, the CLI and the module's own migration chain. It reads the settings
+below out of the globals you pass it.
+
+The frontend is separate. The backend refuses nothing without it, but the
+sharing drawer and the Owner/Sharing columns only exist if you apply
+`overlay/frontend/` to your Superset source before `npm run build`. See
+[For pcs-ivanti](#for-pcs-ivanti-applying-this-to-your-fips-build) for the
+exact build-stage placement.
+
+### 2. Configure it
+
+The minimum, in `superset_config_docker.py` **before** `configure(globals())`:
+
+```python
+OWNERSHIP_ENABLED = True
+OWNERSHIP_AUTHORIZER = "openfga"
+OWNERSHIP_DIRECTORY = "openfga"
+OWNERSHIP_FGA_API_URL = os.environ["OPENFGA_API_URL"]
+OWNERSHIP_FGA_STORE = os.environ["OPENFGA_STORE_ID"]
+OWNERSHIP_FGA_MODEL = os.environ.get("OPENFGA_MODEL_ID", "")  # pin it in production
+OWNERSHIP_FGA_CREDENTIALS = {"type": "none"}
+```
+
+For a store behind a bearer token, replace the last line with:
+
+```python
+OWNERSHIP_FGA_CREDENTIALS = {"type": "api_token", "token_env": "OPENFGA_TOKEN"}
+```
+
+Secrets are named, never inlined: the module reads the environment variable
+you name and re-reads it on every call, so a rotated token is picked up
+without a restart and nothing sensitive lands in a config file or a log
+line.
+
+`none` and `api_token` are the two credential types this version accepts.
+**OIDC client credentials are not built in** -- if your store sits behind
+one, supply the whole connection yourself:
+
+```python
+OWNERSHIP_FGA_CONFIG_PROVIDER = "my_company.ownership:connection"
+```
+
+That callable returns an `FgaConnection` and owns how it was obtained, so
+any scheme works. `overlay/pythonpath/ivanti_pcs_example/fga.py` is a
+worked example.
+
+Worth setting deliberately:
+
+| Setting | Default | What it decides |
+|---|---|---|
+| `OWNERSHIP_PUBLIC_SCOPE` | `"tenant"` | Whether "public" means everyone in the object's tenant, or anyone holding the dataset grant (`"instance"`) |
+| `OWNERSHIP_GROUP_ID_FORMAT` | `"{tenant}.{name}"` | How a group id is composed. Must match what is in your store |
+| `OWNERSHIP_LOOKUP_CACHE_TTL` | `10` | Seconds a row is served from the shared cache. Also the maximum lag before a revoked tenant administrator stops reading |
+| `OWNERSHIP_OUTBOX_ENABLED` | `True` | Keep it on: writes are queued and delivered in order, so a store outage never loses a change |
+| `OWNERSHIP_MANAGE_PERMISSION` | `None` | Optional role that may manage others' sharing |
+
+### 3. Install the authorization model into your store
+
+```bash
+superset ownership fga install-model --pin
+```
+
+The `ownership` command group only exists once `OWNERSHIP_ENABLED` is true,
+which is why this comes after the config. It uses the connection you just
+configured; to aim it somewhere else for one run, pass
+`--api-url`, `--store` and `--credentials-env` instead.
+
+It writes five types -- `user`, `tenant`, `group`, `dashboard`, `chart` --
+and prints the model id to pin. If your store already has a model, yours is
+**merged**, not replaced: your types are left exactly as they are and ours
+are added or updated. Re-running when nothing changed is a no-op rather than
+a new model version.
+
+The model is also readable as
+`overlay/pythonpath/superset_ownership/model/ownership.fga` if you would
+rather review it, or install it with your own tooling, before running that
+command.
+
+What it says, in short: an object carries `owner`, `editor`, `viewer` and
+`tenant`; owning implies editing and editing implies viewing, so those two
+are computed rather than stored; and `viewer`/`editor` accept a group's
+member set, so sharing with a group is one tuple that stays correct as the
+group's membership changes.
+
+### 4. Make your identities resolvable
+
+This is the step that decides whether it works, and the one most likely to
+need you. The module has to turn a logged-in Superset user into a subject
+your store recognises. Out of the box it assumes:
+
+- the user's **member id** is their Superset username;
+- their **tenant** comes from a role named `tenant_<guid>` or
+  `Tenant_<guid>_Role`;
+- the subject is therefore `user:<tenant>.<member>`;
+- a **tenant administrator** holds `admin` on `tenant:<guid>`.
+
+If that already describes your instance, there is nothing to do. If it does
+not, you override the seams rather than patch the module -- each is a
+dotted path to your own callable, and you can replace one without touching
+the others:
+
+```python
+OWNERSHIP_MEMBER_GUID = "my_company.ownership:member_guid"
+OWNERSHIP_TENANT_GUID = "my_company.ownership:tenant_guid"
+OWNERSHIP_IS_TENANT_ADMINISTRATOR = "my_company.ownership:is_tenant_administrator"
+OWNERSHIP_GROUP_ID = "my_company.ownership:group_id"
+OWNERSHIP_SPLIT_GROUP_ID = "my_company.ownership:split_group_id"
+```
+
+`overlay/pythonpath/ivanti_pcs_example/` is a complete, working example of
+exactly this -- a real deployment's identity, directory, authorizer and
+hooks, each one small. Read `hooks.py` first. A hook that raises fails
+closed and is logged; it never grants.
+
+### 5. Migrate, then adopt what is already there
+
+```bash
+superset ownership db upgrade      # this module's own chain; yours is untouched
+
+python -c "
+from superset.app import create_app
+app = create_app()
+with app.app_context():
+    from superset_ownership.backfill import run
+    run()
+"
+
+superset ownership backfill-tenants
+```
+
+The migration creates three tables of its own -- `ownership_object`,
+`ownership_share`, `ownership_outbox` -- and modifies nothing of
+Superset's. The backfill has no CLI command of its own because it is a
+one-time adoption step, not an operation -- it needs an app context, which
+is what that snippet builds; `docker/entrypoint-ownership.sh` runs exactly
+this and is worth copying into your own entrypoint, so a deploy can never
+migrate without adopting. The backfill gives every existing dashboard and chart an owner
+(whoever created it) and makes it public, so an instance that had no
+ownership yesterday behaves exactly as it did -- nothing becomes invisible
+because you installed this.
+
+### 6. Check it
+
+```bash
+superset ownership status                       # is it on, and which backend
+superset ownership fga show-model --check       # does the store's model match
+superset ownership check                        # is anything inconsistent
+superset ownership plugin verify --sample-users 40
+```
+
+`check` answering `"ok": true` is the state to keep. If it does not, the
+field names say what to look at -- `silently_open`, `missing_object`,
+`uuid_divergence`, `orphaned_sentinel`, and the `outbox` block -- and
+`superset ownership reconcile --write` repairs the ones that are repairable.
+
+`plugin verify` is the one to run after step 4: it takes real users out of
+your directory and reports, per user, whether their identity resolves and
+their tenant and groups come back the shape the module expects.
+
+### What working looks like
+
+Create a chart, open its Sharing drawer, set it to Private. Another user in
+your tenant gets a 404 on it -- not a permission banner, not an empty
+chart. Share it with them and they see it within about ten seconds (the
+outbox drain interval). Take the store offline and the object stays
+private: denial never depends on the store being reachable.
 
 ## Quick setup
 
@@ -29,7 +228,7 @@ credential helper, or SSH). Ports 8097, 8199, 8183 and 3010 must be free.
 ### 1. Clone
 
 ```bash
-git clone https://github.com/amaannawab923/pcs-ownership-ivanti.git
+git clone https://github.com/preset-io/pcs-ivanti-object-ownership.git
 ```
 
 ### 2. Build, start, seed
