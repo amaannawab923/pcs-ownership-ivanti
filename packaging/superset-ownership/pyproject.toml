@@ -11,7 +11,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "superset-ownership"
-version = "0.5.0"
+version = "0.6.0"
 description = "Object ownership and sharing for Apache Superset / Preset PCS, authorized by OpenFGA"
 readme = "README.md"
 requires-python = ">=3.11"

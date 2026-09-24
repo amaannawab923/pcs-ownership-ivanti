@@ -129,3 +129,30 @@ test('a non-degraded empty /subjects response still reads as "No results found"'
   renderPanel();
   expect(await screen.findByText('No results found')).toBeInTheDocument();
 });
+
+// Issue #125: a Superset admin has no tenant of their own, so /subjects
+// answered with nothing and the picker was permanently empty for the one
+// caller with authority over every object. The panel names the object it is
+// picking for, and the route falls back to that object's tenant.
+test('the object being shared is sent to /subjects', async () => {
+  fetchMock.get(SUBJECTS_ENDPOINT, { result: [], tenant: 'acme' });
+  render(
+    <SubjectPickerPanel
+      initiallySelected={[]}
+      object="chart:12"
+      onCancel={jest.fn()}
+      onOk={jest.fn()}
+    />,
+  );
+  await screen.findByText('No results found');
+  const calls = fetchMock.callHistory.calls(SUBJECTS_ENDPOINT);
+  expect(calls[calls.length - 1].url).toContain('object=chart%3A12');
+});
+
+test('no object means no parameter, for a caller scoped by their own tenant', async () => {
+  fetchMock.get(SUBJECTS_ENDPOINT, { result: [], tenant: 'acme' });
+  renderPanel();
+  await screen.findByText('No results found');
+  const calls = fetchMock.callHistory.calls(SUBJECTS_ENDPOINT);
+  expect(calls[calls.length - 1].url).not.toContain('object=');
+});

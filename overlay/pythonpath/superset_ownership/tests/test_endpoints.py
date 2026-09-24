@@ -2859,29 +2859,1227 @@ def test_soft_delete_keeps_the_relationships(harness):
     assert purges == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        f"{ISSUE_81}: the permanent delete of an archived object (POST "
-        "/<uuid>/purge, and the retention sweep) hard-deletes with a Core "
-        "`sa.delete`, which never puts the object in session.deleted; the flush "
-        "guard's _collect_deleted does not run, so the ownership row, the share "
-        "rows and the store's tuples are orphaned until `superset ownership "
-        "reconcile`. Under this build's SOFT_DELETE default that is the only "
-        "hard-delete path production takes."
-    ),
-)
+def _share_subjects(harness, ref) -> list[str]:
+    """The mirror rows on an object, by subject."""
+    import sqlalchemy as sa
+
+    from superset_ownership.db import ownership_share
+
+    with harness.ctx():
+        from superset import db
+
+        return [
+            r["subject"]
+            for r in db.session.execute(
+                sa.select(ownership_share)
+                .where(
+                    ownership_share.c.asset_type == ref.asset_type,
+                    ownership_share.c.object_id == ref.id,
+                )
+                .order_by(ownership_share.c.id)
+            ).mappings()
+        ]
+
+
 def test_permanent_delete_of_an_archived_object_removes_tuples(harness):
+    """`POST /<uuid>/purge` -- and the retention sweep behind it -- hard-deletes
+    with a Core `sa.delete`, which never puts the object in `session.deleted`:
+    the flush guard's `_collect_deleted` did not run, and the ownership row,
+    the share rows and every tuple were orphaned for good (issue #120, first
+    filed as #81). Under this build's SOFT_DELETE default that is the only
+    hard-delete path production takes.
+
+    `guard._before_core_delete` now catches it. The object is soft-deleted
+    first, so this also pins that the ids are read past Superset's own
+    soft-delete visibility filter -- the rows being purged are exactly the
+    ones an ordinary query cannot see.
+    """
     w = harness.world
     chart = harness.create_chart(w.ada, "purge")
     harness.set_visibility(w.ada, chart, "shared")
     harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+    assert harness.authorizer.tuples_on(chart.obj) != set()
+
     assert harness.delete(w.ada, f"/api/v1/chart/{chart.id}").status_code == 200
     r = harness.post(w.ada, f"/api/v1/chart/{chart.uuid}/purge")
     assert r.status_code == 200, r.get_json()
-    assert harness.row(chart) is None
+
+    assert harness.row(chart) is None, "the ownership row went with the object"
+    assert _share_subjects(harness, chart) == [], "and so did its shares"
+    (purge,) = [
+        o
+        for o in harness.outbox()
+        if o["op"] == "purge_object" and o["object"] == chart.obj
+    ]
+    assert purge["status"] == "pending", "queued in the purge's own transaction"
+
     harness.drain()
     assert harness.authorizer.tuples_on(chart.obj) == set()
+
+
+def test_a_bulk_core_delete_collects_every_object_it_removes(harness):
+    """The listener keys off the statement, not the route: a bulk
+    `session.execute(sa.delete(...))` over several charts -- what a data
+    migration or a cleanup script writes -- collects each of them."""
+    w = harness.world
+    charts = [harness.create_chart(w.ada, f"bulk-{i}") for i in range(3)]
+    for chart in charts:
+        harness.set_visibility(w.ada, chart, "shared")
+        harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+    survivor = harness.create_chart(w.ada, "bulk-survivor")
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        db.session.execute(
+            delete(Slice.__table__).where(
+                Slice.__table__.c.id.in_([c.id for c in charts])
+            )
+        )
+        db.session.commit()
+
+    for chart in charts:
+        assert harness.row(chart) is None, f"{chart.id} still has an ownership row"
+        assert _share_subjects(harness, chart) == []
+    assert harness.row(survivor) is not None, "an untouched object is untouched"
+
+    harness.drain()
+    for chart in charts:
+        assert harness.authorizer.tuples_on(chart.obj) == set()
+
+
+def test_a_delete_that_loses_its_race_keeps_the_ownership_row(harness):
+    """The collection runs inside the caller's transaction, before the DELETE.
+    `cascade_hard_delete` does its work in a savepoint and rolls it back when
+    it loses the race for the row -- so the ownership rows have to come back
+    with it, or a purge that deleted nothing would still have destroyed the
+    object's ownership.
+
+    Review round 1: the first version of this rolled back a savepoint that
+    the listener had never written into, so it passed with the listener
+    removed entirely. It now asserts the two halves separately -- that the
+    collection HAPPENED inside the savepoint, and that the rollback undid it
+    -- so neither can pass by accident.
+    """
+    w = harness.world
+    chart = harness.create_chart(w.ada, "rollback")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+    tuples_before = harness.authorizer.tuples_on(chart.obj)
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+        from superset_ownership import service
+        from superset_ownership.db import ownership_object
+
+        db.session.begin_nested()
+        db.session.execute(
+            delete(Slice.__table__).where(Slice.__table__.c.id == chart.id)
+        )
+        # Inside the savepoint, before the rollback: the collection really
+        # ran. Read through the session, not the cache.
+        inside = db.session.execute(
+            ownership_object.select().where(
+                ownership_object.c.asset_type == "chart",
+                ownership_object.c.object_id == chart.id,
+            )
+        ).first()
+        assert inside is None, "the listener collected inside the savepoint"
+        db.session.rollback()
+        service.invalidate(chart.asset_type, chart.id)
+
+    assert harness.row(chart) is not None, "the row came back with the savepoint"
+    assert _share_subjects(harness, chart) == [w.ben.ref]
+    assert [
+        o
+        for o in harness.outbox()
+        if o["object"] == chart.obj and o["op"] == "purge_object"
+    ] == [], "and no purge was left queued for an object that still exists"
+    assert harness.authorizer.tuples_on(chart.obj) == tuples_before
+
+
+def test_a_delete_whose_criteria_carries_a_bound_parameter_still_works(harness):
+    """Review round 1. The parameters live on the EXECUTION, not on the
+    statement, and the listener re-ran the whereclause without them: the
+    inner SELECT raised `A value is required for bind parameter` and, from
+    inside the event, killed the caller's DELETE. A listener standing in
+    front of every statement in the application must not be able to turn a
+    legal one into an error."""
+    w = harness.world
+    chart = harness.create_chart(w.ada, "bound-param")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+
+    with harness.ctx():
+        from sqlalchemy import bindparam, delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        db.session.execute(
+            delete(Slice.__table__).where(Slice.__table__.c.id == bindparam("cid")),
+            {"cid": chart.id},
+        )
+        db.session.commit()
+
+    assert harness.row(chart) is None, "the delete ran AND the ownership went with it"
+    assert _share_subjects(harness, chart) == []
+    harness.drain()
+    assert harness.authorizer.tuples_on(chart.obj) == set()
+
+
+def test_a_failure_inside_the_collection_does_not_kill_the_delete(harness, monkeypatch):
+    """Review round 1. The ORM path deliberately swallows an unexpected error
+    from the hook -- "must not stop Superset from deleting the object" -- and
+    this path did not, so a raising hook (an unreachable cache, a removed
+    ownership table after a teardown) would have failed EVERY chart and
+    dashboard hard delete in the instance. Same policy on both paths now: the
+    delete goes ahead and the row is `reconcile`'s to sweep."""
+    from superset_ownership import guard
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "hook-raises")
+    harness.set_visibility(w.ada, chart, "shared")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("ownership_object is gone")
+
+    monkeypatch.setattr(guard, "_collect_core_deleted", _boom)
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        db.session.execute(
+            delete(Slice.__table__).where(Slice.__table__.c.id == chart.id)
+        )
+        db.session.commit()
+
+        remaining = db.session.query(Slice).filter_by(id=chart.id).first()
+    assert remaining is None, "the caller's delete still ran"
+
+
+def test_a_delete_whose_criteria_spans_two_tables_is_not_guessed_at(harness, caplog):
+    """A criteria dragging in another table makes the listener's SELECT a
+    cartesian product whose ids name objects the DELETE does not touch.
+    PostgreSQL compiles such a DELETE as `DELETE ... USING`, so it is a real
+    statement shape (review round 1). Collect nothing and say so, rather than
+    remove the ownership of an object that survives."""
+    import logging
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "two-tables")
+    harness.set_visibility(w.ada, chart, "shared")
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.dashboard import Dashboard
+        from superset.models.slice import Slice
+
+        with caplog.at_level(logging.WARNING, logger="superset_ownership.guard"):
+            try:
+                db.session.execute(
+                    delete(Slice.__table__)
+                    .where(Slice.__table__.c.id == chart.id)
+                    .where(Dashboard.__table__.c.id == Dashboard.__table__.c.id)
+                )
+            except Exception:  # noqa: BLE001 - SQLite refuses the DELETE itself
+                db.session.rollback()
+
+    assert any("spans" in rec.getMessage() for rec in caplog.records), (
+        "it says it did not collect, so an operator can reconcile"
+    )
+    assert harness.row(chart) is not None, "and it removed nothing on a guess"
+
+
+def test_reconcile_clears_an_ownership_row_whose_object_is_already_gone(harness):
+    """The repair half of issue #120. An instance that hard-deleted objects
+    before the listener existed still carries their rows, their shares and
+    their tuples, and nothing could clear them. `rows_without_object` -- which
+    `reconcile` now runs -- does, through the same hook the live path uses.
+    """
+    from superset_ownership import guard, lifecycle
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "orphan")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+    assert harness.authorizer.tuples_on(chart.obj) != set()
+
+    # The object goes the way it went before the listener: with the guard
+    # standing down, so the ownership row and the tuples are left behind.
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        with guard.suppressed():
+            db.session.execute(
+                delete(Slice.__table__).where(Slice.__table__.c.id == chart.id)
+            )
+            db.session.commit()
+    assert harness.row(chart) is not None, "the orphan this repairs"
+
+    with harness.ctx():
+        preview = lifecycle.rows_without_object(dry_run=True)
+    assert f"chart:{chart.id}" in preview["rows_without_object"]
+    assert "rows_removed" not in preview
+    assert harness.row(chart) is not None, "a dry run changes nothing"
+
+    with harness.ctx():
+        repaired = lifecycle.rows_without_object(dry_run=False)
+    assert repaired["rows_removed"] == 1
+    assert harness.row(chart) is None
+    assert _share_subjects(harness, chart) == []
+
+    harness.drain()
+    assert harness.authorizer.tuples_on(chart.obj) == set()
+
+    with harness.ctx():
+        assert lifecycle.rows_without_object(dry_run=True)["rows_without_object"] == []
+
+
+def test_the_orphan_sweep_refuses_when_it_cannot_see_soft_deleted_rows(
+    harness, monkeypatch, caplog
+):
+    """Review round 1. "Absent from `all_rows`" only means "gone" when
+    `all_rows` can see everything, and its soft-delete bypass sits behind
+    `except ImportError: pass`. One upstream rename and the sweep would have
+    destroyed the ownership -- and the live viewer tuples -- of every
+    soft-deleted object in the instance. It now proves it can see them
+    first, and skips the asset type rather than guessing."""
+    import logging
+
+    from superset_ownership import lifecycle
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "blind-sweep")
+    harness.set_visibility(w.ada, chart, "shared")
+    assert harness.delete(w.ada, f"/api/v1/chart/{chart.id}").status_code == 200
+
+    monkeypatch.setattr(lifecycle, "sweeps_soft_deleted", lambda model: False)
+    # And the sweep must not lean on `all_rows` at all in that state.
+    monkeypatch.setattr(
+        lifecycle, "all_rows", lambda model: pytest.fail("read the partial view")
+    )
+
+    with harness.ctx():
+        with caplog.at_level(logging.ERROR, logger="superset_ownership.lifecycle"):
+            report = lifecycle.rows_without_object(dry_run=False)
+
+    assert report["rows_without_object"] == []
+    assert report["rows_without_object_skipped"] == ["chart", "dashboard"]
+    assert any("cannot tell" in rec.getMessage() for rec in caplog.records)
+    assert harness.row(chart) is not None, "the soft-deleted object kept its ownership"
+
+
+def test_sweeps_soft_deleted_is_true_for_this_build(harness):
+    """The guard above is only worth having if it says yes on a healthy
+    build -- otherwise it would silently disable the sweep."""
+    from superset.models.slice import Slice
+
+    from superset_ownership import lifecycle
+
+    with harness.ctx():
+        assert lifecycle.sweeps_soft_deleted(Slice) is True
+
+
+def test_reconcile_follows_a_diverged_uuid_before_it_touches_any_tuple(
+    harness, monkeypatch
+):
+    """Review round 2: the helper had a test, the WIRING did not -- removing
+    `reconcile`'s call to it left the suite green. Order matters as much as
+    the call: reconcile builds every store reference from the row, so a row
+    that still names a dead uuid has to be followed BEFORE the loop that
+    writes owner tuples from it."""
+    from superset_ownership import lifecycle
+
+    order: list[str] = []
+
+    def _repoint(dry_run=True):
+        order.append(f"repoint(dry_run={dry_run})")
+        return {"rows_with_a_diverged_uuid": []}
+
+    def _no_store_needed(operation):
+        order.append("gate")
+        return None
+
+    monkeypatch.setattr(lifecycle, "_repoint_diverged_rows", _repoint)
+    monkeypatch.setattr(lifecycle, "_requires_openfga", _no_store_needed)
+
+    from superset_ownership import fga
+
+    monkeypatch.setattr(fga, "read_all", lambda *a, **k: order.append("fga") or [])
+
+    with harness.ctx():
+        report = lifecycle.reconcile(dry_run=True)
+
+    assert "repoint(dry_run=True)" in order, "reconcile must run it at all"
+    assert order.index("repoint(dry_run=True)") < (
+        order.index("fga") if "fga" in order else len(order)
+    ), "and before it reads or writes a single tuple"
+    assert "rows_with_a_diverged_uuid" in report, "and fold its report into its own"
+
+
+def test_a_soft_deleted_object_is_not_an_orphan(harness):
+    """A soft-deleted object still exists and still owns its ownership row --
+    restoring it from the trash has to restore what it was. The sweep reads
+    past Superset's visibility filter for exactly this reason."""
+    from superset_ownership import lifecycle
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "archived")
+    harness.set_visibility(w.ada, chart, "shared")
+    assert harness.delete(w.ada, f"/api/v1/chart/{chart.id}").status_code == 200
+
+    with harness.ctx():
+        report = lifecycle.rows_without_object(dry_run=False)
+    assert f"chart:{chart.id}" not in report["rows_without_object"]
+    assert harness.row(chart) is not None
+
+
+def test_an_object_whose_uuid_changes_takes_its_ownership_with_it(harness):
+    """Issue #127: Superset's dashboard import validates collisions by uuid
+    but resolves by `slug`, so it can replace a LIVE object in place and give
+    it the imported file's uuid. The ownership row and every tuple then
+    described an object with a uuid nothing has -- and `check` said ok.
+
+    The store is addressed by uuid, so following the object means moving its
+    grants: the old reference is purged and the owner, the tenant and every
+    share are re-queued under the new one.
+    """
+    import uuid as uuid_module
+
+    from superset_ownership import lifecycle
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "reuuid")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+    old_obj = chart.obj
+    assert {t[1] for t in harness.authorizer.tuples_on(old_obj)} == {"owner", "viewer"}
+
+    new_uuid = str(uuid_module.uuid4())
+    with harness.ctx():
+        from superset import db
+        from superset.models.slice import Slice
+
+        live = db.session.query(Slice).filter_by(id=chart.id).one()
+        live.uuid = new_uuid
+        db.session.commit()
+
+    row = harness.row(chart)
+    assert row is not None and str(row.object_uuid) == new_uuid, (
+        "the row followed the object"
+    )
+
+    harness.drain()
+    assert harness.authorizer.tuples_on(old_obj) == set(), "the old reference is gone"
+    moved = harness.authorizer.tuples_on(f"chart:{new_uuid}")
+    assert {t[1] for t in moved} == {"owner", "viewer"}, (
+        "and the owner and the share came with it"
+    )
+
+    with harness.ctx():
+        assert lifecycle.check_consistency()["uuid_divergence"] == []
+
+
+def test_check_reports_a_row_and_an_object_that_disagree_about_the_uuid(harness):
+    """The repair half of #127: an instance that already diverged (the import
+    happened before the module followed it) could not see it -- `check`
+    compared everything about a row except the one identifier the
+    authorization store actually addresses the object by."""
+    import uuid as uuid_module
+
+    from superset_ownership import guard, lifecycle
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "diverged")
+    harness.set_visibility(w.ada, chart, "shared")
+    new_uuid = str(uuid_module.uuid4())
+
+    with harness.ctx():
+        from superset import db
+        from superset.models.slice import Slice
+
+        # With the guard standing down, the way it went before it followed.
+        with guard.suppressed():
+            live = db.session.query(Slice).filter_by(id=chart.id).one()
+            live.uuid = new_uuid
+            db.session.commit()
+
+    with harness.ctx():
+        report = lifecycle.check_consistency()
+    assert report["ok"] is False
+    assert report["uuid_divergence"] == [
+        {"object": f"chart:{chart.id}", "mirrored": chart.uuid, "live": new_uuid}
+    ]
+
+    # The world is shared with every other test in this module, and a
+    # diverged row fails `check` for all of them. Put it back the way the
+    # live path would have.
+    with harness.ctx():
+        from superset import db
+        from superset_ownership import service
+
+        service.repoint_object_uuid("chart", chart.id, chart.uuid, new_uuid)
+        db.session.commit()
+    with harness.ctx():
+        assert lifecycle.check_consistency()["uuid_divergence"] == []
+
+
+def test_reconcile_repairs_a_diverged_uuid_instead_of_writing_onto_a_dead_one(
+    harness,
+):
+    """Review round 1. `check` reported `uuid_divergence` and UPDATING named
+    `reconcile --write` as the remedy -- but reconcile built its store
+    reference from the STALE mirrored uuid, so it wrote a fresh owner tuple
+    onto the dead reference and reported `owner_tuple_written` as though it
+    had repaired something. The pre-existing damage was detectable and
+    unrepairable."""
+    import uuid as uuid_module
+
+    from superset_ownership import guard, lifecycle
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "reconcile-diverged")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+    dead_ref = chart.obj
+    new_uuid = str(uuid_module.uuid4())
+
+    with harness.ctx():
+        from superset import db
+        from superset.models.slice import Slice
+
+        with guard.suppressed():
+            live = db.session.query(Slice).filter_by(id=chart.id).one()
+            live.uuid = new_uuid
+            db.session.commit()
+
+    with harness.ctx():
+        preview = lifecycle._repoint_diverged_rows(dry_run=True)
+    assert preview["rows_with_a_diverged_uuid"] == [f"chart:{chart.id}"]
+    assert harness.row(chart).object_uuid != new_uuid, "a dry run changes nothing"
+
+    with harness.ctx():
+        repaired = lifecycle._repoint_diverged_rows(dry_run=False)
+    assert repaired["rows_repointed"] == 1
+    assert str(harness.row(chart).object_uuid) == new_uuid
+
+    harness.drain()
+    assert harness.authorizer.tuples_on(dead_ref) == set()
+    moved = {t[1] for t in harness.authorizer.tuples_on(f"chart:{new_uuid}")}
+    assert moved == {"owner", "viewer"}
+    with harness.ctx():
+        assert lifecycle.check_consistency()["uuid_divergence"] == []
+
+
+def test_a_diverged_instance_does_not_boot_in_silence(harness, caplog):
+    """`uuid_divergence` counted against `ok` but `startup_check` had no
+    branch for it, so a diverged instance lost the "startup check ok" line
+    and gained no error -- the one state where the boot log says nothing at
+    all (review round 1)."""
+    import logging
+    import uuid as uuid_module
+
+    from superset_ownership import guard, lifecycle, service
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "silent-boot")
+    harness.set_visibility(w.ada, chart, "shared")
+    new_uuid = str(uuid_module.uuid4())
+    old_uuid = chart.uuid
+
+    with harness.ctx():
+        from superset import db
+        from superset.models.slice import Slice
+
+        with guard.suppressed():
+            live = db.session.query(Slice).filter_by(id=chart.id).one()
+            live.uuid = new_uuid
+            db.session.commit()
+    try:
+        with harness.ctx():
+            with caplog.at_level(logging.ERROR, logger="superset_ownership.lifecycle"):
+                report = lifecycle.startup_check()
+        assert report["ok"] is False
+        messages = [rec.getMessage() for rec in caplog.records]
+        assert any("no longer carries" in m for m in messages)
+        assert any("reconcile --write" in m for m in messages)
+    finally:
+        with harness.ctx():
+            from superset import db
+
+            service.repoint_object_uuid("chart", chart.id, old_uuid, new_uuid)
+            db.session.commit()
+
+
+def test_the_orm_entity_form_of_a_bulk_delete_is_collected_too(harness):
+    """Review round 2. `delete(Slice)` -- the entity form, and what
+    `Query.delete()` compiles to -- carries its target as an
+    `AnnotatedTable`, which is `==` the plain `Table` but not `is` it. The
+    multi-FROM guard compared by identity and declined every entity-form
+    delete as "spans 1 table", so `superset/commands/security/reset.py`
+    would have deleted every chart and dashboard and left every ownership
+    row and every live `viewer` tuple behind."""
+    w = harness.world
+    charts = [harness.create_chart(w.ada, f"entity-{i}") for i in range(2)]
+    for chart in charts:
+        harness.set_visibility(w.ada, chart, "shared")
+        harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        db.session.execute(delete(Slice).where(Slice.id.in_([c.id for c in charts])))
+        db.session.commit()
+
+    for chart in charts:
+        assert harness.row(chart) is None, f"{chart.id} kept its ownership row"
+        assert _share_subjects(harness, chart) == []
+    harness.drain()
+    for chart in charts:
+        assert harness.authorizer.tuples_on(chart.obj) == set()
+
+
+def test_a_failure_part_way_through_the_collection_leaves_nothing_half_done(
+    harness, monkeypatch
+):
+    """Review round 2. The collection removes the local rows first and only
+    then enqueues the store purge, so containing a failure in a later step
+    used to commit the worst state available: the object gone, the row gone,
+    and the store still holding `owner` and `viewer` -- undetectable,
+    because `check` and `reconcile` both enumerate from `ownership_object`.
+    Its own savepoint means a contained failure contains all of it."""
+    from superset_ownership import outbox
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "half-done")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+    tuples_before = harness.authorizer.tuples_on(chart.obj)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("the store intent could not be queued")
+
+    monkeypatch.setattr(outbox, "purge_object", _boom)
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        db.session.execute(
+            delete(Slice.__table__).where(Slice.__table__.c.id == chart.id)
+        )
+        db.session.commit()
+
+        gone = db.session.query(Slice).filter_by(id=chart.id).first()
+
+    assert gone is None, "the caller's delete still ran"
+    # The ownership row survives the contained failure, so `check` reports
+    # `missing_object` and `reconcile --write` can finish the job. The
+    # alternative -- row deleted, tuples kept -- is the one nothing can see.
+    assert harness.row(chart) is not None, "the half-done state was rolled back"
+    assert harness.authorizer.tuples_on(chart.obj) == tuples_before
+
+    monkeypatch.undo()  # the store is reachable again
+    with harness.ctx():
+        from superset_ownership import lifecycle
+
+        assert f"chart:{chart.id}" in lifecycle.check_consistency()["missing_object"]
+        lifecycle.rows_without_object(dry_run=False)
+    harness.drain()
+    assert harness.authorizer.tuples_on(chart.obj) == set(), "and reconcile finishes it"
+
+
+def test_the_core_delete_path_does_not_take_the_modules_own_lock(harness, monkeypatch):
+    """Review round 2 asked for this to be pinned. `cascade_hard_delete`
+    already holds the asset row FOR UPDATE before the statement the listener
+    stands in front of, so taking this module's per-object lock there is the
+    one place that locks AFTER the asset row -- the ABBA against the
+    visibility route. The ORM path, which runs before Superset's own
+    statements, still takes it."""
+    from superset_ownership import hooks
+
+    calls: list[bool] = []
+    real = hooks.after_asset_delete
+
+    def _record(asset_type, object_id, object_uuid, *, lock=True):
+        calls.append(lock)
+        return real(asset_type, object_id, object_uuid, lock=lock)
+
+    monkeypatch.setattr(hooks, "after_asset_delete", _record)
+
+    w = harness.world
+    core_chart = harness.create_chart(w.ada, "lock-core")
+    orm_chart = harness.create_chart(w.ada, "lock-orm")
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        db.session.execute(
+            delete(Slice.__table__).where(Slice.__table__.c.id == core_chart.id)
+        )
+        db.session.commit()
+    assert calls == [False], "the Core path does not lock after the asset row"
+
+    calls.clear()
+    with harness.ctx():
+        from superset import db
+        from superset.models.slice import Slice
+
+        db.session.delete(db.session.query(Slice).filter_by(id=orm_chart.id).one())
+        db.session.commit()
+    assert calls == [True], "the ORM path, which locks first, still does"
+
+
+def test_a_re_point_stamps_the_row_it_names_and_not_a_bystander(harness):
+    """Review round 2, security. `ownership_object.object_uuid` carries no
+    unique constraint, and a `uuid_divergence` is precisely the state where
+    two rows can hold the same one -- which is the state this function
+    exists to repair. Matching the tenant mirror by uuid stamped a BYSTANDER
+    row's `tenant_guid` with the moving object's tenant, which is a read
+    grant: a tenant administrator reads every object of their own tenant, so
+    an administrator of an unrelated tenant went from 404 to 200 on the
+    victim's chart. The row half is matched by id now; the store half stays
+    on uuid, because that is how the store addresses objects.
+    """
+    import uuid as uuid_module
+
+    from superset_ownership import guard, service
+    from superset_ownership.identity import tenant_role_name
+
+    tenant_mover = guid(0x310)
+    tenant_victim = guid(0x320)
+    mover_owner = harness.add_person(
+        guid(0x311),
+        "Mover311",
+        "Gamma",
+        "sales_readers",
+        tenant_role_name(tenant_mover),
+    )
+    victim_owner = harness.add_person(
+        guid(0x321),
+        "Victim321",
+        "Gamma",
+        "sales_readers",
+        tenant_role_name(tenant_victim),
+    )
+    mover = harness.create_chart(mover_owner, "mover-310")
+    victim = harness.create_chart(victim_owner, "victim-320")
+    harness.drain()
+
+    mover_row = harness.row(mover)
+    victim_before = harness.row(victim)
+    assert mover_row.tenant_guid, "the moving object must carry a tenant to stamp"
+    assert service.normalize_tenant(
+        victim_before.tenant_guid
+    ) != service.normalize_tenant(mover_row.tenant_guid), "two different tenants"
+
+    # The shape an instance is left in after an import rewrote one object's
+    # uuid: the victim's ROW claims a uuid, and the object being repaired is
+    # about to be re-pointed onto that same one.
+    collision = str(uuid_module.uuid4())
+    with harness.ctx():
+        from superset import db
+        from superset_ownership.db import ownership_object
+
+        with guard.suppressed():
+            db.session.execute(
+                ownership_object.update()
+                .where(
+                    ownership_object.c.asset_type == "chart",
+                    ownership_object.c.object_id == victim.id,
+                )
+                .values(object_uuid=collision)
+            )
+            db.session.commit()
+        service.invalidate("chart", victim.id)
+
+        service.repoint_object_uuid("chart", mover.id, mover.uuid, collision)
+        db.session.commit()
+    service.invalidate("chart", victim.id)
+
+    victim_after = harness.row(victim)
+    assert service.normalize_tenant(
+        victim_after.tenant_guid
+    ) == service.normalize_tenant(victim_before.tenant_guid), (
+        "a re-point of another object rewrote this row's tenant, which is a "
+        "read grant to that tenant's administrators"
+    )
+    assert service.normalize_tenant(
+        harness.row(mover).tenant_guid
+    ) == service.normalize_tenant(mover_row.tenant_guid), "and the mover kept its own"
+
+    # The world outlives this test, and a row whose uuid disagrees with its
+    # object fails `check` for every test after it. Put both back.
+    with harness.ctx():
+        from superset import db
+        from superset_ownership.db import ownership_object
+
+        with guard.suppressed():
+            db.session.execute(
+                ownership_object.update()
+                .where(
+                    ownership_object.c.asset_type == "chart",
+                    ownership_object.c.object_id == victim.id,
+                )
+                .values(object_uuid=victim.uuid)
+            )
+            db.session.commit()
+        service.repoint_object_uuid("chart", mover.id, collision, mover.uuid)
+        db.session.commit()
+    service.invalidate("chart", victim.id)
+    service.invalidate("chart", mover.id)
+
+
+def test_an_object_repointed_and_deleted_in_one_flush_leaves_no_tuple_behind(harness):
+    """Review round 3. SQLAlchemy drops a deleted object out of
+    `session.dirty`, so `_follow_uuid_changes` never sees an object that was
+    re-pointed AND deleted in the same flush -- while `_collect_deleted`
+    reads the object's already-reassigned in-memory uuid and purged a
+    reference that never held a tuple. The real ones stayed filed under the
+    old uuid forever, and with the row gone nothing could ever find them:
+    `check` and `reconcile` both enumerate from `ownership_object`, so it
+    reported `ok: true` over a live `owner` and `viewer` grant.
+
+    Superset's own import does exactly this combination.
+    """
+    import uuid as uuid_module
+
+    from superset_ownership import lifecycle
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "repoint-and-delete")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+    old_ref = chart.obj
+    assert {t[1] for t in harness.authorizer.tuples_on(old_ref)} == {"owner", "viewer"}
+
+    new_uuid = str(uuid_module.uuid4())
+    with harness.ctx():
+        from superset import db
+        from superset.models.slice import Slice
+
+        live = db.session.query(Slice).filter_by(id=chart.id).one()
+        live.uuid = new_uuid  # in `session.dirty` ...
+        db.session.delete(live)  # ... and now NOT, because it is `deleted`
+        db.session.commit()
+
+    assert harness.row(chart) is None, "the ownership row went with the object"
+    harness.drain()
+    assert harness.authorizer.tuples_on(old_ref) == set(), (
+        "the tuples the store actually held were left behind forever"
+    )
+    assert harness.authorizer.tuples_on(f"chart:{new_uuid}") == set()
+    with harness.ctx():
+        assert lifecycle.check_consistency()["ok"] is True
+
+
+def test_reconcile_does_not_resurrect_an_object_deleted_under_it(harness, monkeypatch):
+    """Review round 3. `reconcile` reads every row once and then spends a
+    store round trip per row. An object deleted in that window has had its
+    row and its tuples removed already -- and a repair written afterwards
+    from the stale snapshot files a live `owner` grant under a reference
+    nothing names any more, which neither `check` nor `reconcile` can ever
+    see again, because both enumerate FROM `ownership_object`.
+
+    The window is reproduced exactly where it really opens: inside the
+    store read, between the snapshot and the write.
+    """
+    from superset_ownership import fga, lifecycle
+
+    w = harness.world
+    victim = harness.create_chart(w.ada, "deleted-mid-reconcile")
+    harness.set_visibility(w.ada, victim, "shared")
+    harness.drain()
+    ref = victim.obj
+
+    written: list = []
+    monkeypatch.setattr(lifecycle, "_requires_openfga", lambda operation: None)
+    from superset_ownership import outbox as outbox_module
+
+    monkeypatch.setattr(
+        outbox_module,
+        "write_tuple",
+        lambda subject, relation, obj: written.append((subject, relation, obj)) or True,
+    )
+
+    def read_all_and_delete(obj, relation=None):
+        """The store answers "no owner tuple" -- and, in the same moment, the
+        object is hard-deleted by another request."""
+        if obj == ref:
+            with harness.ctx():
+                from sqlalchemy import delete
+
+                from superset import db
+                from superset.models.slice import Slice
+
+                db.session.execute(
+                    delete(Slice.__table__).where(Slice.__table__.c.id == victim.id)
+                )
+                db.session.commit()
+        return []
+
+    monkeypatch.setattr(fga, "read_all", read_all_and_delete)
+
+    with harness.ctx():
+        lifecycle.reconcile(dry_run=False)
+
+    assert not [t for t in written if t[2] == ref], (
+        "reconcile wrote an owner tuple for an object deleted under it, under a "
+        f"reference nothing names any more: {written}"
+    )
+
+
+def test_a_re_point_on_an_id_keyed_store_moves_nothing_and_touches_nobody(
+    harness, monkeypatch
+):
+    """Review round 3, the bystander purge. This module's local backend
+    answers from the share ROWS, keyed by (asset_type, object_id), which do
+    not move when a uuid changes -- so a re-point there has nothing to purge
+    and nothing to re-write. Purging anyway resolved the STALE uuid through
+    `lookup_by_uuid`, an unordered `.first()` with no uniqueness behind it,
+    and under the outbox the subject row has already moved, so it could only
+    land on some OTHER row still holding that uuid -- whose share rows the
+    local purge then deletes.
+
+    Pinned at the seam rather than through the fake store: the harness's
+    authorizer keeps tuples, not rows, so only an id-keyed backend shows the
+    damage. What the fix has to guarantee is that such a backend is asked to
+    do nothing at all.
+    """
+    from superset_ownership import authz, service
+
+    # The local backend is the one that resolves a reference back to a row.
+    assert authz.LocalAuthorizer.addresses_objects_by_uuid is False
+
+    w = harness.world
+    mover = harness.create_chart(w.ada, "mover-id-keyed")
+    harness.set_visibility(w.ada, mover, "shared")
+    harness.share(w.ada, mover, w.ben.ref)
+    harness.drain()
+
+    purges: list = []
+    writes: list = []
+    monkeypatch.setattr(
+        service.outbox,
+        "purge_object",
+        lambda asset_type, uuid: purges.append((asset_type, uuid)) or True,
+    )
+    monkeypatch.setattr(
+        service.outbox,
+        "write_tuple",
+        lambda subject, relation, obj: writes.append((subject, relation, obj)) or True,
+    )
+
+    class _IdKeyed:
+        addresses_objects_by_uuid = False
+
+    monkeypatch.setattr(service, "get_authorizer", lambda: _IdKeyed())
+
+    import uuid as uuid_module
+
+    new_uuid = str(uuid_module.uuid4())
+    with harness.ctx():
+        from superset import db
+
+        assert service.repoint_object_uuid("chart", mover.id, mover.uuid, new_uuid)
+        db.session.commit()
+
+    assert purges == [], "an id-keyed store has nothing filed under the old uuid"
+    assert writes == [], "and nothing to re-file under the new one"
+    assert str(harness.row(mover).object_uuid) == new_uuid, "the row still followed"
+
+    # Put it back, so the rest of the suite sees the world it expects.
+    with harness.ctx():
+        from superset import db
+
+        service.repoint_object_uuid("chart", mover.id, new_uuid, mover.uuid)
+        db.session.commit()
+
+
+def test_the_listener_does_not_flush_the_callers_pending_work(harness):
+    """Review round 4: fix 5 had no test, on the one line whose previous two
+    attempts were both wrong.
+
+    `session.begin_nested()` is not "open a SAVEPOINT" --
+    `SessionTransaction._take_snapshot` runs a full `session.flush()` first.
+    A governed Core DELETE autoflushes nothing on its own, so wrapping the
+    collection that way made this listener flush the CALLER's entire
+    pending unit of work in front of every such statement. When that flush
+    failed, the `IntegrityError` is a `DBAPIError`, so the collection's
+    re-raise carried it out of the caller's own
+    `session.execute(delete(...))`.
+
+    Pinned by giving the session a pending ORM object the database will
+    reject, and then issuing an unrelated governed delete: the delete must
+    not be the statement that discovers it.
+    """
+    w = harness.world
+    chart = harness.create_chart(w.ada, "no-flush-please")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.drain()
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        # PENDING ORM work the database will reject: a second chart claiming
+        # a uuid that is already taken. It reaches the database only on a
+        # flush -- which a governed Core DELETE must not cause.
+        doomed = Slice(slice_name="duplicate-uuid", uuid=chart.uuid)
+        db.session.add(doomed)
+        assert db.session.new, "the doomed object is pending, not yet written"
+
+        # The collection runs in front of THIS statement. It must not be the
+        # thing that surfaces the pending row above.
+        db.session.execute(
+            delete(Slice.__table__).where(Slice.__table__.c.id == chart.id)
+        )
+        # Read it back with Core, not the ORM: an ORM query autoflushes,
+        # which would surface the pending row itself and prove nothing.
+        from sqlalchemy import select
+
+        gone = db.session.execute(
+            select(Slice.__table__.c.id).where(Slice.__table__.c.id == chart.id)
+        ).first()
+        assert gone is None, "the caller's own delete ran"
+
+        # Drop the doomed object and let the delete stand, so the world is
+        # left consistent (the chart and its ownership went together) rather
+        # than rolled back to a chart whose ownership row had been collected.
+        db.session.expunge(doomed)
+        db.session.commit()
+
+    assert harness.row(chart) is None
+
+
+def test_an_id_keyed_store_is_told_nothing_when_an_object_is_hard_deleted(
+    harness, monkeypatch
+):
+    """Review round 4's B1, at the delete instead of the re-point. On a
+    backend keyed by object id the relationships ARE the share rows
+    `after_asset_delete` removes itself, and by the time the purge ran the
+    row was gone -- so the reference resolved to whichever OTHER row still
+    held that uuid and deleted THAT object's shares, permanently, with
+    `check` still green.
+
+    The gate has to be patched on `hooks`, not `service`: `hooks.py` imports
+    `get_authorizer` into its own namespace.
+    """
+    from superset_ownership import hooks
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "id-keyed-delete")
+    harness.set_visibility(w.ada, chart, "shared")
+    harness.share(w.ada, chart, w.ben.ref)
+    harness.drain()
+
+    purges: list = []
+    monkeypatch.setattr(
+        hooks.outbox,
+        "purge_object",
+        lambda asset_type, uuid: purges.append((asset_type, uuid)) or True,
+    )
+
+    class _IdKeyed:
+        addresses_objects_by_uuid = False
+
+    monkeypatch.setattr(hooks, "get_authorizer", lambda: _IdKeyed())
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset.models.slice import Slice
+
+        db.session.execute(
+            delete(Slice.__table__).where(Slice.__table__.c.id == chart.id)
+        )
+        db.session.commit()
+
+    assert purges == [], f"an id-keyed store has nothing filed under the uuid: {purges}"
+    assert harness.row(chart) is None, "and the local rows went anyway"
+
+
+def test_reconcile_skips_a_row_transferred_under_it(harness):
+    """Review round 4. `expected` comes from the snapshot's `owner_user_id`,
+    so a transfer landing in reconcile's window had the PREVIOUS owner's
+    tuple written back and the new owner's deleted -- with `remaining: {}`
+    and `check` ok. The re-read has to cover the owner, and must not start
+    rejecting rows whose concurrent write does not touch the owner tuple."""
+    from superset_ownership import lifecycle
+    from superset_ownership.db import ownership_object
+
+    w = harness.world
+    chart = harness.create_chart(w.ada, "transferred-mid-reconcile")
+    harness.set_visibility(w.ada, chart, "private")
+    harness.drain()
+
+    with harness.ctx():
+        from superset import db
+
+        snap = dict(
+            db.session.execute(
+                ownership_object.select().where(
+                    ownership_object.c.asset_type == "chart",
+                    ownership_object.c.object_id == chart.id,
+                )
+            )
+            .mappings()
+            .first()
+        )
+        assert lifecycle._row_still_there(snap) is True
+
+        def _write(**values):
+            db.session.execute(
+                ownership_object.update()
+                .where(
+                    ownership_object.c.asset_type == "chart",
+                    ownership_object.c.object_id == chart.id,
+                )
+                .values(**values)
+            )
+            db.session.commit()
+
+        # Benign: neither of these is what the repair writes.
+        _write(visibility="shared")
+        assert lifecycle._row_still_there(snap) is True, (
+            "a visibility write is not a transfer"
+        )
+        _write(tenant_guid="tenant-xyz")
+        assert lifecycle._row_still_there(snap) is True, (
+            "a tenant stamp is not a transfer"
+        )
+
+        # The one that is.
+        _write(owner_user_id=snap["owner_user_id"] + 1)
+        assert lifecycle._row_still_there(snap) is False, (
+            "a transfer must stop the repair"
+        )
+
+
+def test_a_reference_two_rows_answer_to_resolves_to_neither(harness):
+    """Review round 5, and the sixth member of this class -- the first on the
+    READ side. `object_uuid` carries no unique constraint, and a divergence
+    is exactly the state where two rows hold one uuid. The default backend
+    resolves every object reference through `lookup_by_uuid`, so an
+    unordered `.first()` handed the reference to whichever row the database
+    felt like returning: measured, that let the read gate admit a user to an
+    object never shared with them, and let the drain deliver a REVOCATION to
+    a bystander -- leaving the subject it was meant to cut off with their
+    grant, the outbox row marked delivered, and nothing able to see it.
+
+    Ambiguity answers "no row", which denies, refuses or skips at every
+    caller.
+    """
+    from superset_ownership import guard, service
+
+    w = harness.world
+    one = harness.create_chart(w.ada, "ambiguous-one")
+    two = harness.create_chart(w.ada, "ambiguous-two")
+    harness.drain()
+
+    assert service_lookup_uuid(harness, str(one.uuid)) is not None, "unambiguous first"
+
+    with harness.ctx():
+        from superset import db
+        from superset_ownership.db import ownership_object
+
+        with guard.suppressed():
+            db.session.execute(
+                ownership_object.update()
+                .where(
+                    ownership_object.c.asset_type == "chart",
+                    ownership_object.c.object_id == two.id,
+                )
+                .values(object_uuid=str(one.uuid))
+            )
+            db.session.commit()
+        service.invalidate("chart", two.id)
+
+    assert service_lookup_uuid(harness, str(one.uuid)) is None, (
+        "two rows answer to this reference, so it names none of them"
+    )
+
+    # Put it back.
+    with harness.ctx():
+        from superset import db
+        from superset_ownership.db import ownership_object
+
+        with guard.suppressed():
+            db.session.execute(
+                ownership_object.update()
+                .where(
+                    ownership_object.c.asset_type == "chart",
+                    ownership_object.c.object_id == two.id,
+                )
+                .values(object_uuid=str(two.uuid))
+            )
+            db.session.commit()
+        service.invalidate("chart", two.id)
+
+
+def service_lookup_uuid(harness, uuid_value):
+    from superset_ownership import service
+
+    with harness.ctx():
+        return service.lookup_by_uuid("chart", uuid_value)
+
+
+def test_a_delete_of_something_ungoverned_costs_nothing(harness):
+    """The listener fires on every Session.execute in the application. A
+    DELETE against any other table must not reach the ownership tables at
+    all."""
+    w = harness.world
+    chart = harness.create_chart(w.ada, "untouched")
+    harness.set_visibility(w.ada, chart, "shared")
+    before = harness.authorizer.names
+
+    with harness.ctx():
+        from sqlalchemy import delete
+
+        from superset import db
+        from superset_ownership.db import ownership_outbox
+
+        db.session.execute(delete(ownership_outbox).where(ownership_outbox.c.id < 0))
+        db.session.commit()
+
+    assert harness.row(chart) is not None
+    assert harness.authorizer.names == before
 
 
 # --- 13. DATASET -------------------------------------------------------------
@@ -4508,6 +5706,114 @@ def test_tenant_administrator_lists_a_chartless_dashboard(harness):
     assert harness.decide(tam, empty).verdict == ALLOW
 
 
+def test_a_revoked_administrator_can_be_forgotten_without_waiting_for_the_ttl(
+    harness,
+):
+    """Issue #130: a "yes" is shared for OWNERSHIP_LOOKUP_CACHE_TTL seconds
+    and nothing invalidates it, so an administrator the platform has just
+    demoted keeps reading that tenant's objects until the entry ages out.
+    The TTL is the documented bound; this is how an operator stops waiting
+    for it. (A GRANT needs nothing: a "no" is never shared.)"""
+    from superset_ownership import plugin_hooks, service
+
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x1F0)
+    row = harness.row(chart)
+
+    with harness.acting_as(tam):
+        user = harness._user(tam)
+        assert service.tenant_admin_reads(row, user) is True
+
+    with harness.ctx():
+        assert (
+            plugin_hooks.cache_get(service._ADMINISTERED_TENANT_SETTING, "user", tam.id)
+            is not plugin_hooks.MISS
+        ), "the answer another request would be served"
+
+    # The platform revokes the relation; nothing tells this module.
+    admin_tuple = (tam.ref, "admin", f"tenant:{service.normalize_tenant(tenant_a)}")
+    harness.authorizer.tuples.discard(admin_tuple)
+    try:
+        with harness.ctx():
+            assert service.forget_administered_tenant(tam.id) is True
+            assert (
+                plugin_hooks.cache_get(
+                    service._ADMINISTERED_TENANT_SETTING, "user", tam.id
+                )
+                is plugin_hooks.MISS
+            )
+
+        with harness.acting_as(tam):
+            assert service.tenant_admin_reads(row, harness._user(tam)) is False, (
+                "the next request asks the store, and the store says no"
+            )
+    finally:
+        # The store outlives this test; every tenant in it keeps its
+        # administrator, which other tests enumerate.
+        harness.authorizer.tuples.add(admin_tuple)
+        with harness.ctx():
+            service.forget_administered_tenant(tam.id)
+
+
+def test_forgetting_an_administrator_also_drops_the_hooks_own_answer(harness):
+    """Review round 1. Where a deployment configures
+    `OWNERSHIP_IS_TENANT_ADMINISTRATOR`, that hook's answer is cached in the
+    same shared layer under its OWN key. Dropping only the derived one meant
+    the recompute read the stale hook answer and re-cached the same "yes"
+    with a fresh full TTL -- the command made the problem last longer."""
+    from flask import current_app
+
+    from superset_ownership import plugin_hooks, plugins, service
+
+    tenant_a, ana, tam, cleo, chart, dash = _tenant_admin_world(harness, 0x300)
+    row = harness.row(chart)
+    answers = {"value": True}
+
+    with harness.ctx():
+        reg = current_app.extensions[plugins.EXT_KEY]
+        reg.hooks.callables["OWNERSHIP_IS_TENANT_ADMINISTRATOR"] = lambda user: answers[
+            "value"
+        ]
+    try:
+        with harness.acting_as(tam):
+            assert service.tenant_admin_reads(row, harness._user(tam)) is True
+
+        with harness.ctx():
+            assert (
+                plugin_hooks.cache_get(
+                    "OWNERSHIP_IS_TENANT_ADMINISTRATOR", "user", tam.id
+                )
+                is not plugin_hooks.MISS
+            ), "the hook's own answer is cached, separately"
+
+        # The platform demotes them; the hook would now say no.
+        answers["value"] = False
+
+        with harness.ctx():
+            service.forget_administered_tenant(tam.id)
+            assert (
+                plugin_hooks.cache_get(
+                    "OWNERSHIP_IS_TENANT_ADMINISTRATOR", "user", tam.id
+                )
+                is plugin_hooks.MISS
+            ), "both keys go, or the recompute re-caches the stale yes"
+
+        with harness.acting_as(tam):
+            assert service.tenant_admin_reads(row, harness._user(tam)) is False
+    finally:
+        with harness.ctx():
+            current_app.extensions[plugins.EXT_KEY].hooks.callables.pop(
+                "OWNERSHIP_IS_TENANT_ADMINISTRATOR", None
+            )
+            service.forget_administered_tenant(tam.id)
+
+
+def test_forgetting_an_administrator_nobody_cached_is_not_an_error(harness):
+    from superset_ownership import service
+
+    with harness.ctx():
+        service.forget_administered_tenant(999999)
+
+
 def test_a_negative_administrator_answer_is_not_shared_across_requests(harness):
     """A "no" is request-local: a member made administrator between two
     requests is one on the second, not after the TTL. (A "yes" is shared
@@ -4549,3 +5855,100 @@ def test_ownership_list_route_scopes_the_administrator_from_the_rows(harness):
     assert (row["can_manage"], row["can_share"]) == (True, False)
     r = harness.get(cleo, "/api/v1/ownership/charts?limit=100")
     assert chart.id not in {item["object_id"] for item in r.get_json()["result"]}
+
+
+# --- QA blockers: subject validation and the shapes the store will refuse ---------
+
+
+def test_a_group_subject_without_member_is_refused_not_queued(harness):
+    """Issue #118, the blocker two QA testers hit by accident. The store only
+    accepts a group as a subject in its userset form, so `group:<id>` with
+    no `#member` could never be delivered -- it used to answer 200, sit in
+    the mirror, die in the outbox, and then block every later intent for
+    that object. It is a malformed subject and it is refused before
+    anything is written."""
+    tenant = guid(0x1F)
+    role = f"Tenant_{tenant}_Role"
+    una = harness.add_person(guid(0x200), "Una", "Gamma", "sales_readers", role)
+    chart = harness.create_chart(una, "no-member-suffix")
+    harness.set_visibility(una, chart, "shared")
+    harness.drain()
+
+    for bad in (
+        f"group:{tenant}.dashboard_designer",
+        f"group:{tenant}.dashboard_designer#",
+        f"group:{tenant}.dashboard_designer#admin",
+        "group:#member",
+    ):
+        r = harness.post(
+            una,
+            f"/api/v1/ownership/chart/{chart.id}/shares",
+            {"subject": bad, "role": "viewer"},
+        )
+        assert r.status_code == 400, (bad, r.status_code, r.get_json())
+        assert "member set" in r.get_json()["message"], bad
+
+    with harness.ctx():
+        from superset_ownership import outbox, service
+
+        assert service.list_share_rows("chart", chart.id) == []
+        assert outbox.status()["dead"] == 0
+    # And the well-formed spelling still works.
+    harness.authorizer.groups[f"{tenant}.dashboard_designer"] = set()
+    r = harness.post(
+        una,
+        f"/api/v1/ownership/chart/{chart.id}/shares",
+        {"subject": f"group:{tenant}.dashboard_designer#member", "role": "viewer"},
+    )
+    assert r.status_code == 200, r.get_json()
+
+
+def test_a_group_name_with_a_space_or_colon_is_a_400_not_a_500(harness):
+    """Issue #124: the picker's display text is the spaced name, so a paste
+    lands here. `identity.group_id` raised out of the validators and the
+    route answered 500."""
+    tenant = guid(0x21)
+    role = f"Tenant_{tenant}_Role"
+    uri = harness.add_person(guid(0x210), "Uri", "Gamma", "sales_readers", role)
+    chart = harness.create_chart(uri, "spaced-group-name")
+    harness.set_visibility(uri, chart, "shared")
+
+    for bad in (
+        f"group:{tenant}.dashboard designer#member",
+        f"group:{tenant}.dashboard designer#member",
+        f"group:{tenant}.dash:designer#member",
+        f"group:{tenant}.{'x' * 250}#member",
+    ):
+        r = harness.post(
+            uri,
+            f"/api/v1/ownership/chart/{chart.id}/shares",
+            {"subject": bad, "role": "viewer"},
+        )
+        assert r.status_code == 400, (bad, r.status_code, r.get_json())
+        from urllib.parse import quote
+
+        r = harness.delete(
+            uri, f"/api/v1/ownership/chart/{chart.id}/shares/{quote(bad, safe='')}"
+        )
+        assert r.status_code == 400, (bad, r.status_code, r.get_json())
+
+
+def test_wrong_typed_bodies_are_400_not_500(harness):
+    """Issue #128: `{"subject": 123}` and `{"visibility": ["private"]}` raised
+    a TypeError inside the validators while every sibling wrong type
+    answered a clean 400."""
+    tenant = guid(0x22)
+    role = f"Tenant_{tenant}_Role"
+    uma = harness.add_person(guid(0x220), "Uma", "Gamma", "sales_readers", role)
+    chart = harness.create_chart(uma, "wrong-types")
+    harness.set_visibility(uma, chart, "shared")
+
+    for body in ({"subject": 123}, {"subject": ["user:x"]}, {"subject": {"a": 1}}):
+        r = harness.post(uma, f"/api/v1/ownership/chart/{chart.id}/shares", body)
+        assert r.status_code == 400, (body, r.status_code, r.get_json())
+    for body in ({"visibility": ["private"]}, {"visibility": 1}, {"visibility": {}}):
+        r = harness.put(uma, f"/api/v1/ownership/chart/{chart.id}/visibility", body)
+        assert r.status_code == 400, (body, r.status_code, r.get_json())
+    # The owner route takes the same subject validator.
+    r = harness.put(uma, f"/api/v1/ownership/chart/{chart.id}/owner", {"subject": 7})
+    assert r.status_code == 400, r.get_json()

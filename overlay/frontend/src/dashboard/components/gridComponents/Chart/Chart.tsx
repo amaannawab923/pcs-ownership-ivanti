@@ -783,6 +783,7 @@ const Chart = (props: ChartProps) => {
           props.updateSliceName(props.id, name)
         }
         sliceName={props.sliceName}
+        noAccess={noAccess}
         supersetCanExplore={supersetCanExplore && !noAccess}
         supersetCanShare={supersetCanShare && !noAccess}
         supersetCanDownload={supersetCanDownload && !noAccess}

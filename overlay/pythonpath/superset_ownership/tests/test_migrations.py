@@ -81,6 +81,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 import sqlalchemy as sa
 from superset_ownership import db as ownership_db, migrate
 
@@ -2374,3 +2375,80 @@ def test_integrity_kind_reads_the_driver_where_it_names_the_constraint():
     assert service._integrity_kind(
         IntegrityError("INSERT ...", {}, Exception("NOT NULL constraint failed"))
     ) == ("unknown", None)
+
+
+# --- issue #121: a downgrade must not destroy data on its way to the target ---
+
+
+def test_destructive_steps_lists_what_a_downgrade_would_run(tmp_path):
+    """Alembic downgrades TO a revision, so asking for 0002 from head runs
+    0004's DROP COLUMN and 0003's FK drops first -- and never reaches
+    0002's own undelivered-rows guard. The pre-flight has to see that."""
+    uri = _uri(tmp_path)
+    migrate.upgrade("head", uri)
+
+    path = migrate.downgrade_path("0002_ownership_outbox", uri)
+    assert path[0] == HEAD_REVISION
+    assert "0002_ownership_outbox" not in path, "the target itself is not run"
+
+    steps = dict(migrate.destructive_steps("0002_ownership_outbox", uri))
+    assert "0004_ownership_object_tenant" in steps
+    assert "tenant_guid" in steps["0004_ownership_object_tenant"]
+    assert "0002_ownership_outbox" not in steps, "not crossed; it is the target"
+
+    # 'base' crosses the outbox drop as well.
+    to_base = dict(migrate.destructive_steps("base", uri))
+    assert "0002_ownership_outbox" in to_base
+    assert "0004_ownership_object_tenant" in to_base
+
+
+def test_a_downgrade_that_crosses_nothing_destructive_is_not_flagged(tmp_path):
+    """From head every downgrade crosses 0004, so the harmless case has to be
+    read from lower down the chain: standing at 0003, going to 0002 runs only
+    0003, which drops constraints and no data."""
+    uri = _uri(tmp_path)
+    migrate.upgrade("0003_ownership_foreign_keys", uri)
+
+    assert migrate.downgrade_path("0002_ownership_outbox", uri) == [
+        "0003_ownership_foreign_keys"
+    ]
+    assert migrate.destructive_steps("0002_ownership_outbox", uri) == []
+
+
+def test_destructive_steps_is_empty_when_nothing_would_run(tmp_path):
+    uri = _uri(tmp_path)
+    assert migrate.current(uri) is None
+    assert migrate.destructive_steps("base", uri) == []
+
+
+def test_an_operators_short_revision_id_is_resolved(tmp_path):
+    """Review round 1: operators type `0002`, alembic resolves it, and the
+    pre-flight compared the raw string against full ids -- so
+    `db downgrade 0002`, the command issue #121 is named after, reported
+    nothing destructive and dropped `tenant_guid` behind a y/n prompt."""
+    uri = _uri(tmp_path)
+    migrate.upgrade("head", uri)
+
+    assert migrate.downgrade_path("0002", uri) == migrate.downgrade_path(
+        "0002_ownership_outbox", uri
+    )
+    steps = dict(migrate.destructive_steps("0002", uri))
+    assert "0004_ownership_object_tenant" in steps
+    assert "tenant_guid" in steps["0004_ownership_object_tenant"]
+
+
+@pytest.mark.parametrize("target", ["0009_not_a_revision", "-1", "head-1", "", "000"])
+def test_a_target_this_chain_cannot_resolve_is_refused_not_answered(tmp_path, target):
+    """Not being able to say what a downgrade would run is not the same as it
+    running nothing: answering `[]` invited the caller straight past the
+    pre-flight. The unresolvable ones raise so the CLI can refuse."""
+    uri = _uri(tmp_path)
+    migrate.upgrade("head", uri)
+
+    if target == "":  # an empty target is `base`, which IS resolvable
+        assert migrate.downgrade_path(target, uri) == migrate.downgrade_path(
+            "base", uri
+        )
+        return
+    with pytest.raises(migrate.UnreadableRevision):
+        migrate.destructive_steps(target, uri)

@@ -690,3 +690,119 @@ test('fetches ownership once and shows the ownership surface when OBJECT_OWNERSH
     ).mockReset();
   }
 });
+
+// Issue #122: when the ownership list cannot be read, every row's Owner and
+// Sharing read "Unknown" -- exactly what a genuinely unowned object reads as.
+// Not inventing an owner is right; leaving the page silent about it is not.
+test('says so when the ownership list cannot be read, instead of showing a page of Unknown', async () => {
+  fetchMock.removeRoutes();
+  // 404, not 503: SupersetClient retries a 503 with backoff, which is the
+  // client's business, not this page's.
+  fetchMock.get(ownershipListRoute, 404, { name: 'ownership-list-down' });
+  setupMocks();
+  (
+    isFeatureEnabled as jest.MockedFunction<typeof isFeatureEnabled>
+  ).mockImplementation((feature: string) => feature === 'OBJECT_OWNERSHIP');
+  try {
+    renderChartList(adminChartUser);
+    await screen.findByTestId('chart-list-view');
+    const alert = await screen.findByTestId('ownership-unavailable');
+    expect(alert).toHaveTextContent(
+      'Ownership information could not be loaded',
+    );
+    expect(alert).toHaveTextContent('does not mean these objects have no owner');
+  } finally {
+    fetchMock.clearHistory();
+    (
+      isFeatureEnabled as jest.MockedFunction<typeof isFeatureEnabled>
+    ).mockReset();
+  }
+});
+
+test('the unavailable notice is absent when the ownership list reads fine', async () => {
+  fetchMock.removeRoutes();
+  fetchMock.get(ownershipListRoute, { count: 0, result: [] });
+  setupMocks();
+  (
+    isFeatureEnabled as jest.MockedFunction<typeof isFeatureEnabled>
+  ).mockImplementation((feature: string) => feature === 'OBJECT_OWNERSHIP');
+  try {
+    renderChartList(adminChartUser);
+    await screen.findByTestId('chart-list-view');
+    await screen.findAllByTestId('chart-row-delete');
+    expect(
+      screen.queryByTestId('ownership-unavailable'),
+    ).not.toBeInTheDocument();
+  } finally {
+    fetchMock.clearHistory();
+    (
+      isFeatureEnabled as jest.MockedFunction<typeof isFeatureEnabled>
+    ).mockReset();
+  }
+});
+
+// Issue #123: the Actions column was gated on edit/delete/export alone, so a
+// user whose only action on an object IS sharing lost the control with the
+// whole column -- and DashboardList, which has no such early return, quietly
+// disagreed with ChartList about it.
+test('a read-only user still gets the Sharing action when object ownership is on', async () => {
+  fetchMock.removeRoutes();
+  fetchMock.get(ownershipListRoute, {
+    count: 1,
+    result: [
+      {
+        object_id: mockCharts[0].id,
+        owner: { id: 1, name: 'Admin User', tenant_guid: null },
+        visibility: 'private',
+        unowned: false,
+        can_manage: true,
+        can_share: true,
+      },
+    ],
+  });
+  setupMocks({ [API_ENDPOINTS.CHARTS_INFO]: ['can_read'] });
+  (
+    isFeatureEnabled as jest.MockedFunction<typeof isFeatureEnabled>
+  ).mockImplementation((feature: string) => feature === 'OBJECT_OWNERSHIP');
+  try {
+    renderChartList({ ...adminChartUser, roles: {} });
+    await screen.findByTestId('chart-list-view');
+    const table = await screen.findByTestId('listview-table');
+    const headers = within(table)
+      .getAllByRole('columnheader')
+      .map(header => header.textContent?.trim());
+    expect(headers).toContain('Actions');
+    expect(
+      (await screen.findAllByTestId('chart-row-share')).length,
+    ).toBeGreaterThan(0);
+    // The stock actions are still gated on the stock permissions.
+    expect(screen.queryByTestId('chart-row-delete')).not.toBeInTheDocument();
+  } finally {
+    fetchMock.clearHistory();
+    (
+      isFeatureEnabled as jest.MockedFunction<typeof isFeatureEnabled>
+    ).mockReset();
+  }
+});
+
+test('a read-only user gets no Actions column with object ownership off', async () => {
+  fetchMock.removeRoutes();
+  setupMocks({ [API_ENDPOINTS.CHARTS_INFO]: ['can_read'] });
+  (
+    isFeatureEnabled as jest.MockedFunction<typeof isFeatureEnabled>
+  ).mockImplementation(() => false);
+  try {
+    renderChartList({ ...adminChartUser, roles: {} });
+    await screen.findByTestId('chart-list-view');
+    const table = await screen.findByTestId('listview-table');
+    const headers = within(table)
+      .getAllByRole('columnheader')
+      .map(header => header.textContent?.trim());
+    expect(headers).not.toContain('Actions');
+  } finally {
+    fetchMock.clearHistory();
+    (
+      isFeatureEnabled as jest.MockedFunction<typeof isFeatureEnabled>
+    ).mockReset();
+  }
+});

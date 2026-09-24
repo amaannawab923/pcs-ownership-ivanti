@@ -254,6 +254,96 @@ def lineage_includes(revision: str, at: str) -> bool:
     return revision in {r.revision for r in script.iterate_revisions(at, "base")}
 
 
+# Revisions whose `downgrade()` discards data rather than only structure.
+# `db downgrade` refuses to cross one of these without --yes (issue #121):
+# Alembic downgrades TO the named revision, so `downgrade 0002` from head
+# runs 0004's DROP COLUMN first and never reaches 0002's own guard.
+DESTRUCTIVE_DOWNGRADES = {
+    "0004_ownership_object_tenant": (
+        "drops ownership_object.tenant_guid -- every object's tenant, "
+        "recoverable only by re-running `ownership backfill-tenants`"
+    ),
+    "0002_ownership_outbox": (
+        "drops ownership_outbox -- any undelivered authorization write is lost"
+    ),
+}
+
+
+class UnreadableRevision(ValueError):
+    """The operator named a downgrade target this chain cannot resolve.
+
+    Raised rather than answered, because the two safe-looking answers are
+    both wrong: "nothing would run" invites the caller to proceed, and
+    "everything would run" refuses a command that alembic may well accept.
+    The caller (the CLI) turns this into a refusal that asks for a full
+    revision id.
+    """
+
+
+def _resolve_downgrade_target(revision: Optional[str], script) -> Optional[str]:
+    """The full revision id the operator's string names, or None for `base`.
+
+    Operators type `0002`, not `0002_ownership_outbox`, and alembic resolves
+    the short form -- so comparing the raw string against full ids made
+    `destructive_steps("0002")` empty and let `db downgrade 0002` (the exact
+    command issue #121 is named after) drop `tenant_guid` behind nothing but
+    a y/n prompt. Found in review round 1. Relative targets (`-1`,
+    `head-1`) are not resolvable this way and raise, which is the safe
+    direction: the pre-flight refuses instead of under-reporting.
+    """
+    if revision is None:
+        return None
+    value = str(revision).strip()
+    if not value or value.lower() == "base":
+        return None
+    try:
+        resolved = script.get_revision(value)
+    except Exception as exc:  # noqa: BLE001 - alembic's CommandError and friends
+        raise UnreadableRevision(
+            f"{revision!r} does not name a revision of the ownership chain "
+            "(relative targets like '-1' are not supported here; give the "
+            "full revision id)"
+        ) from exc
+    return getattr(resolved, "revision", None)
+
+
+def downgrade_path(revision: str, database_uri: Optional[str] = None) -> list[str]:
+    """The revisions a `downgrade <revision>` would actually run, newest
+    first: everything from the current revision down to, but not including,
+    `revision` ('base' includes every one).
+
+    Raises `UnreadableRevision` when the target cannot be resolved.
+    """
+    from alembic.script import ScriptDirectory
+
+    at = current(database_uri)
+    script = ScriptDirectory.from_config(_config(database_uri or "sqlite://"))
+    # Resolved BEFORE the "no revision recorded" shortcut, so an unreadable
+    # target is reported as unreadable whatever state the database is in.
+    target = _resolve_downgrade_target(revision, script)
+    if at is None:
+        return []
+    walked = [r.revision for r in script.iterate_revisions(at, "base")]
+    if target is None:
+        return walked
+    if target not in walked:
+        return []  # not an ancestor: alembic will refuse, nothing would run
+    return walked[: walked.index(target)]
+
+
+def destructive_steps(
+    revision: str, database_uri: Optional[str] = None
+) -> list[tuple[str, str]]:
+    """(revision, what it discards) for every data-destroying step a
+    `downgrade <revision>` would run. Raises `UnreadableRevision` when the
+    target cannot be resolved -- see `_resolve_downgrade_target`."""
+    return [
+        (rev, DESTRUCTIVE_DOWNGRADES[rev])
+        for rev in downgrade_path(revision, database_uri)
+        if rev in DESTRUCTIVE_DOWNGRADES
+    ]
+
+
 def downgrade(revision: str, database_uri: Optional[str] = None) -> None:
     from alembic import command
 

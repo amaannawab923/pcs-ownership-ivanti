@@ -102,6 +102,7 @@ import type { OwnershipListItem } from 'src/features/ownership/types';
 import VisibilityTag from 'src/features/ownership/VisibilityTag';
 import SharingDrawer from 'src/features/ownership/SharingDrawer';
 import OwnerCell from 'src/features/ownership/OwnerCell';
+import OwnershipUnavailableAlert from 'src/features/ownership/OwnershipUnavailableAlert';
 
 const FlexRowContainer = styled.div`
   align-items: center;
@@ -307,6 +308,10 @@ function ChartList(props: ChartListProps) {
   const [ownershipById, setOwnershipById] = useState<
     Record<number, OwnershipListItem>
   >({});
+  // Issue #122: an empty map and a map of genuinely unowned objects render
+  // identically -- every row "Unknown". The page has to be able to say which
+  // one this is, so the failure is state, not just an empty result.
+  const [ownershipUnavailable, setOwnershipUnavailable] = useState(false);
   const [chartToShare, setChartToShare] = useState<Chart | null>(null);
 
   const ownershipEnabled = isFeatureEnabled(FeatureFlag.ObjectOwnership);
@@ -314,11 +319,17 @@ function ChartList(props: ChartListProps) {
   const loadOwnership = useCallback(() => {
     if (!ownershipEnabled) return;
     fetchOwnershipList('chart')
-      .then(setOwnershipById)
+      .then(rows => {
+        setOwnershipById(rows);
+        setOwnershipUnavailable(false);
+      })
       .catch(() => {
         // Ownership state is unreadable (feature off, or the endpoint is
-        // down). Show Unknown and no sharing controls -- never a guess.
+        // down). Show Unknown and no sharing controls -- never a guess --
+        // and say so above the list, because "Unknown" on every row is
+        // otherwise indistinguishable from the truth (issue #122).
         setOwnershipById({});
+        setOwnershipUnavailable(true);
       });
   }, [ownershipEnabled]);
 
@@ -744,7 +755,10 @@ function ChartList(props: ChartListProps) {
           const handleShare = () => setChartToShare(original);
           const ownership = getOwnership(original.id);
           const { can_share: canShare, can_manage: canManage } = ownership;
-          if (!canEdit && !canDelete && !canExport) {
+          // Issue #123: gating on the three stock permissions alone took the
+          // Sharing control away with the rest of the cell, from exactly the
+          // users whose only action here IS sharing.
+          if (!canEdit && !canDelete && !canExport && !ownershipEnabled) {
             return null;
           }
 
@@ -821,7 +835,7 @@ function ChartList(props: ChartListProps) {
         id: 'actions',
         size: 'lg',
         disableSortBy: true,
-        hidden: !canEdit && !canDelete && !canExport,
+        hidden: !canEdit && !canDelete && !canExport && !ownershipEnabled,
       },
       {
         accessor: QueryObjectColumns.ChangedBy,
@@ -841,6 +855,7 @@ function ChartList(props: ChartListProps) {
       openChartEditModal,
       openChartDeleteModal,
       getOwnership,
+      ownershipEnabled,
     ],
   );
 
@@ -1127,6 +1142,10 @@ function ChartList(props: ChartListProps) {
   return (
     <>
       <SubMenu name={t('Charts')} buttons={subMenuButtons} />
+      <OwnershipUnavailableAlert
+        unavailable={ownershipUnavailable}
+        onRetry={loadOwnership}
+      />
       {sliceCurrentlyEditing && (
         <PropertiesModal
           onHide={closeChartEditModal}

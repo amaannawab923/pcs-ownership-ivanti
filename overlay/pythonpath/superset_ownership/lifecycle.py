@@ -70,9 +70,42 @@ def all_rows(model):
         query = query.execution_options(**{SKIP_VISIBILITY_FILTER_CLASSES: {model}})
     except ImportError:
         # A build without the soft-delete mixin: the plain query already
-        # returns every row.
+        # returns every row. `sweeps_soft_deleted` is what decides whether
+        # that is true or whether this except branch just swallowed the one
+        # thing that made the sweep complete -- ask it before TREATING an
+        # absence here as "the object is gone".
         pass
     return query.all()
+
+
+def sweeps_soft_deleted(model) -> bool:
+    """Can `all_rows(model)` really see soft-deleted rows of this model?
+
+    `all_rows` applies the documented bypass behind `except ImportError:
+    pass`, which is right for a build that has no soft delete and wrong for
+    one that has it under a different name: the sweep then silently returns
+    the LIVE rows only. Reporting that as "these objects are gone" is
+    harmless; DELETING their ownership on it is not, and
+    `rows_without_object` does exactly that (review round 1). So the
+    destructive caller asks this first and refuses rather than guessing.
+
+    True when the model is not soft-deletable at all (nothing to bypass), or
+    when the bypass this build documents is importable.
+    """
+    try:
+        from superset.models.helpers import SoftDeleteMixin
+    except ImportError:
+        return True  # no soft delete in this build: a plain query is complete
+    try:
+        if not issubclass(model, SoftDeleteMixin):
+            return True
+    except TypeError:  # pragma: no cover - a stand-in model in a pure test
+        return True
+    try:
+        from superset.constants import SKIP_VISIBILITY_FILTER_CLASSES  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def _member_guids(tenant_guid: str) -> list[str]:
@@ -835,6 +868,10 @@ def check_consistency() -> dict[str, Any]:
         "silently_open": [],
         "orphaned_sentinel": [],
         "missing_object": [],
+        # Issue #127: the row and the live object disagree about the uuid the
+        # authorization store addresses this object by, so every tuple on it
+        # describes something that no longer exists under that reference.
+        "uuid_divergence": [],
     }
 
     # Read the columns the database actually has: a deliberate downgrade
@@ -851,16 +888,19 @@ def check_consistency() -> dict[str, Any]:
         ownership_object.c.asset_type,
         ownership_object.c.object_id,
         ownership_object.c.visibility,
+        ownership_object.c.object_uuid,
     ]
     if have_tenant_column:
         columns.append(ownership_object.c.tenant_guid)
     columns.append(ownership_object.c.owner_user_id)
     rows = db.session.execute(select(*columns)).mappings().all()
     by_type: dict[str, dict[int, str]] = {"dashboard": {}, "chart": {}}
+    uuid_by_type: dict[str, dict[int, Optional[str]]] = {"dashboard": {}, "chart": {}}
     tenant_by_type: dict[str, dict[int, Optional[str]]] = {"dashboard": {}, "chart": {}}
     owner_by_type: dict[str, dict[int, Optional[int]]] = {"dashboard": {}, "chart": {}}
     for r in rows:
         by_type.setdefault(r["asset_type"], {})[r["object_id"]] = r["visibility"]
+        uuid_by_type.setdefault(r["asset_type"], {})[r["object_id"]] = r["object_uuid"]
         tenant_by_type.setdefault(r["asset_type"], {})[r["object_id"]] = (
             r["tenant_guid"] if have_tenant_column else None
         )
@@ -881,12 +921,28 @@ def check_consistency() -> dict[str, Any]:
     for asset_type, model in (("dashboard", Dashboard), ("chart", Slice)):
         wanted = by_type.get(asset_type, {})
         tenants = tenant_by_type.get(asset_type, {})
+        uuids = uuid_by_type.get(asset_type, {})
         present = {o.id: o for o in all_rows(model)}
         for object_id, visibility in wanted.items():
             obj = present.get(object_id)
             if obj is None:
                 report["missing_object"].append(f"{asset_type}:{object_id}")
                 continue
+            # The store is addressed by uuid. A row pointing at a uuid the
+            # object no longer carries means every tuple on it -- owner,
+            # tenant and every share -- hangs off a reference that resolves
+            # to nothing (issue #127: a dashboard import can rewrite the
+            # uuid of a live object in place).
+            mirrored_uuid = uuids.get(object_id)
+            live_uuid = str(getattr(obj, "uuid", "") or "") or None
+            if mirrored_uuid and live_uuid and mirrored_uuid != live_uuid:
+                report["uuid_divergence"].append(
+                    {
+                        "object": f"{asset_type}:{object_id}",
+                        "mirrored": mirrored_uuid,
+                        "live": live_uuid,
+                    }
+                )
             armed = subject is not None and subject in (obj.viewers or [])
             if visibility in enforced and not armed:
                 report["silently_open"].append(f"{asset_type}:{object_id}")
@@ -978,6 +1034,7 @@ def check_consistency() -> dict[str, Any]:
         report["silently_open"]
         or report["orphaned_sentinel"]
         or report["missing_object"]
+        or report["uuid_divergence"]
         or report["group_id_mismatch"]
         or report["user_id_mismatch"]
         or report["constraints_missing"]
@@ -1226,6 +1283,15 @@ def startup_check(repair: bool = False) -> dict[str, Any]:
             group_id_format(),
             report["group_id_mismatch"][:20],
         )
+    if report.get("uuid_divergence"):
+        logger.error(
+            "superset_ownership: %d ownership row(s) name a uuid the live object no "
+            "longer carries, so every tuple on them -- owner, tenant and every share "
+            "-- hangs off a reference that resolves to nothing. Run `superset "
+            "ownership reconcile --write` to follow them: %s",
+            len(report["uuid_divergence"]),
+            report["uuid_divergence"][:20],
+        )
     if report.get("user_id_mismatch"):
         logger.error(
             "superset_ownership: %d user subject(s) in the share mirror are spelt "
@@ -1440,6 +1506,175 @@ def _object_uuid(asset_type: str, object_id: int) -> Optional[str]:
     return str(uuid) if uuid else None
 
 
+def _repoint_diverged_rows(dry_run: bool = True) -> dict[str, Any]:
+    """Follow objects whose uuid moved while nothing was watching.
+
+    `guard._follow_uuid_changes` catches this as it happens (issue #127), so
+    this is for the rows an instance carries from before that existed -- the
+    ones `check` reports as `uuid_divergence`. Same hook as the live path
+    (`service.repoint_object_uuid`): purge the dead reference, then re-queue
+    the owner, the tenant and every share under the live uuid.
+    """
+    from superset.models.dashboard import Dashboard
+    from superset.models.slice import Slice
+
+    from superset_ownership.db import ownership_object
+
+    from superset import db
+
+    rows = db.session.execute(ownership_object.select()).mappings().all()
+    live_uuid: dict[tuple[str, int], Optional[str]] = {}
+    for asset_type, model in (("dashboard", Dashboard), ("chart", Slice)):
+        ids = {r["object_id"] for r in rows if r["asset_type"] == asset_type}
+        if not ids:
+            continue
+        for obj in all_rows(model):
+            if obj.id in ids:
+                live_uuid[(asset_type, obj.id)] = (
+                    str(getattr(obj, "uuid", "") or "") or None
+                )
+
+    diverged = [
+        r
+        for r in rows
+        if r["object_uuid"]
+        and live_uuid.get((r["asset_type"], r["object_id"])) is not None
+        and str(r["object_uuid"]) != live_uuid[(r["asset_type"], r["object_id"])]
+    ]
+    report: dict[str, Any] = {
+        "rows_with_a_diverged_uuid": [
+            f"{r['asset_type']}:{r['object_id']}" for r in diverged
+        ]
+    }
+    if not diverged or dry_run:
+        return report
+
+    for r in sorted(diverged, key=lambda r: (r["asset_type"], r["object_id"])):
+        service.repoint_object_uuid(
+            r["asset_type"],
+            r["object_id"],
+            str(r["object_uuid"]),
+            live_uuid[(r["asset_type"], r["object_id"])],
+        )
+    db.session.commit()
+    report["rows_repointed"] = len(diverged)
+    return report
+
+
+def rows_without_object(dry_run: bool = True) -> dict[str, Any]:
+    """Remove ownership rows whose OBJECT no longer exists.
+
+    Until the Core-delete listener (`guard._before_core_delete`, issue #120)
+    every hard delete -- the purge route and the retention sweep both -- left
+    the ownership row, its shares and every one of the object's tuples behind,
+    including live `viewer` grants, and `check` went red with nothing able to
+    clear it: the API has no route for it, `prune` only touches delivered
+    outbox rows, and this command's store-to-row direction could not see it.
+    New orphans should no longer appear; this repairs the ones an instance
+    already has. Called from `reconcile`, and importable on its own for an
+    install whose store is not OpenFGA (`reconcile` requires it; this does
+    not).
+
+    `all_rows`, not a plain query: a SOFT-deleted object still exists and
+    keeps its ownership, because restoring it from the trash has to restore
+    what it was. Only an object missing from that sweep is really gone.
+    """
+    from superset import db
+    from superset.models.dashboard import Dashboard
+    from superset.models.slice import Slice
+
+    from superset_ownership.db import ownership_object
+    from superset_ownership.hooks import after_asset_delete
+
+    rows = db.session.execute(ownership_object.select()).mappings().all()
+    alive: dict[str, set] = {}
+    blind: list[str] = []
+    for asset_type, model in (("dashboard", Dashboard), ("chart", Slice)):
+        ids = {r["object_id"] for r in rows if r["asset_type"] == asset_type}
+        if not ids:
+            continue
+        # "Absent from all_rows" only means "gone" when all_rows can see
+        # everything. If it cannot, a soft-deleted object -- which still
+        # exists and must keep its ownership -- would read as an orphan and
+        # be destroyed along with its live grants (review round 1). Skip the
+        # asset type entirely and say why.
+        if not sweeps_soft_deleted(model):
+            blind.append(asset_type)
+            continue
+        alive[asset_type] = {o.id for o in all_rows(model) if o.id in ids}
+
+    orphans = [
+        r
+        for r in rows
+        if r["asset_type"] not in blind
+        and r["object_id"] not in alive.get(r["asset_type"], set())
+    ]
+    report: dict[str, Any] = {
+        "rows_without_object": [f"{r['asset_type']}:{r['object_id']}" for r in orphans]
+    }
+    if blind:
+        report["rows_without_object_skipped"] = sorted(blind)
+        logger.error(
+            "superset_ownership: cannot tell a deleted %s from a soft-deleted one on "
+            "this build (the documented soft-delete bypass is not importable); their "
+            "ownership rows were NOT swept",
+            " or ".join(sorted(blind)),
+        )
+    if not orphans or dry_run:
+        return report
+
+    # The same hook the delete path uses, so the repair and the live path
+    # cannot drift: local rows first, then ONE purge_object intent per object,
+    # which is what takes the tuples with it. Ordered by (asset_type,
+    # object_id) like every other bulk path here.
+    for r in sorted(orphans, key=lambda r: (r["asset_type"], r["object_id"])):
+        after_asset_delete(r["asset_type"], r["object_id"], r["object_uuid"])
+    db.session.commit()
+    report["rows_removed"] = len(orphans)
+    return report
+
+
+def _row_still_there(snapshot_row) -> bool:
+    """Is the ownership row this snapshot came from still there, unchanged?
+
+    `reconcile` reads every row once and then spends a network round trip
+    per row talking to the store. A hard delete landing in that window
+    removes the row and purges the object's tuples -- and a repair written
+    afterwards from the stale snapshot puts a live `owner` grant back under
+    a reference nothing names any more (review round 3). Compared on the
+    uuid as well as existence, so a row re-pointed under us is skipped too
+    rather than repaired against the reference it has just left.
+
+    And on the OWNER, because that is what the repair writes (review round
+    4). A transfer landing in the same window leaves the row in place with
+    a new owner, while `expected` still names the old one: the repair then
+    wrote the previous owner's `owner` tuple back and deleted the new
+    owner's, handing access back to the person just transferred away from
+    -- with `reconcile` reporting `remaining: {}` and `check` reporting ok.
+    The rule is the general one: re-read everything the write is derived
+    from, not merely enough to prove the row exists.
+    """
+    from superset import db
+
+    from superset_ownership.db import ownership_object
+
+    current = (
+        db.session.execute(
+            ownership_object.select().where(
+                ownership_object.c.asset_type == snapshot_row["asset_type"],
+                ownership_object.c.object_id == snapshot_row["object_id"],
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if current is None:
+        return False
+    if str(current["object_uuid"] or "") != str(snapshot_row["object_uuid"] or ""):
+        return False
+    return current["owner_user_id"] == snapshot_row["owner_user_id"]
+
+
 def reconcile(dry_run: bool = True) -> dict[str, Any]:
     """Bring the authorization store's OWNER tuples back in line with the rows.
 
@@ -1479,8 +1714,22 @@ def reconcile(dry_run: bool = True) -> dict[str, Any]:
         "owner_tuple_written": 0,
         "owner_tuple_removed": 0,
         "share_tuples_without_row": [],
+        # Rows that changed while this command was talking to the store: a
+        # transfer or a delete landing in the window between the snapshot and
+        # the write. Nothing is wrong and nothing is needed -- a later run
+        # sees the settled state -- but an operator reading the JSON should
+        # be able to tell "I declined to repair this" from "I repaired it".
+        "skipped_changed_under_us": [],
         "dry_run": dry_run,
     }
+
+    # A row whose uuid no longer matches the live object addresses a store
+    # reference that resolves to nothing, so every tuple this function would
+    # write from it lands on the dead reference and repairs nothing -- while
+    # reporting `owner_tuple_written` as though it had (review round 1).
+    # Follow the object FIRST, with the same hook the live path uses, so the
+    # loop below works from rows that name something real.
+    report.update(_repoint_diverged_rows(dry_run=dry_run))
 
     rows = db.session.execute(ownership_object.select()).mappings().all()
     for r in rows:
@@ -1505,14 +1754,27 @@ def reconcile(dry_run: bool = True) -> dict[str, Any]:
             # list_objects entry before writing, and enqueues (or writes
             # inline with the outbox disabled) exactly like every other
             # write in this package.
-            if not dry_run and outbox.write_tuple(expected, "owner", obj):
-                report["owner_tuple_written"] += 1
+            # The snapshot `rows` was read once, up front, and every
+            # iteration since has made a network call to the store. An object
+            # deleted in that window has had its row and its tuples removed
+            # already -- writing the owner tuple now files a live `owner`
+            # grant under a reference nothing names any more, and neither
+            # `check` nor `reconcile` can ever see it again, because both
+            # enumerate FROM `ownership_object` (review round 3). Re-read
+            # before writing; the row is the authority, not the snapshot.
+            if not dry_run and _row_still_there(r):
+                if outbox.write_tuple(expected, "owner", obj):
+                    report["owner_tuple_written"] += 1
+            elif not dry_run:
+                report["skipped_changed_under_us"].append(obj)
         for user in actual:
             if user != expected:
                 if dry_run:
                     report.setdefault("owner_tuple_to_remove", []).append(
                         {"object": obj, "user": user}
                     )
+                elif not _row_still_there(r):
+                    report["skipped_changed_under_us"].append(obj)
                 elif outbox.delete_tuple(user, "owner", obj):
                     report["owner_tuple_removed"] += 1
 
@@ -1569,6 +1831,8 @@ def reconcile(dry_run: bool = True) -> dict[str, Any]:
         for r in orphan_shares:
             service.invalidate(r["asset_type"], r["object_id"])
         report["share_rows_removed"] = len(orphan_shares)
+
+    report.update(rows_without_object(dry_run=dry_run))
 
     logger.info(
         "superset_ownership: reconcile -> %s",

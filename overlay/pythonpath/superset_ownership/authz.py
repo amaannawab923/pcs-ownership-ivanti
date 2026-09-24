@@ -380,6 +380,16 @@ class LocalAuthorizer:
         service.remove_share_row(asset_type, object_id, user, role=relation)
         return True
 
+    # Relationships here are the share ROWS, keyed by (asset_type,
+    # object_id). They do not move when an object's uuid changes, so a
+    # re-point has nothing to purge or re-write on this backend -- and must
+    # not try, because the stale uuid it would purge resolves to whatever
+    # row still holds it, which is somebody else's object (review round 3).
+    # OpenFGA files tuples under the object REFERENCE, so the same re-point
+    # genuinely has to move them there; `service.repoint_object_uuid` reads
+    # this to tell the two apart.
+    addresses_objects_by_uuid = False
+
     def purge_object(self, obj: str) -> bool:
         """Local relationships ARE the share rows, which after_asset_delete has
         already removed in the same transaction; anything left is swept here.

@@ -72,6 +72,15 @@ _PENDING = "_superset_ownership_guard_pending_events"
 _NEW_ASSETS = "_superset_ownership_guard_new_assets"
 _SENTINEL_CACHE = "_superset_ownership_guard_sentinel_subject"
 
+# Re-entrancy flag for the Core-delete listener (see _before_core_delete): the
+# statements it issues itself go through the same Session, and so through the
+# same event.
+_IN_CORE_DELETE = "_superset_ownership_guard_in_core_delete"
+
+# The tables a governed object actually lives in. A DELETE aimed at one of
+# these is a hard delete of a chart or a dashboard however it was written.
+_GOVERNED_TABLES = {"slices": "chart", "dashboards": "dashboard"}
+
 
 @contextmanager
 def suppressed(session=None):
@@ -194,7 +203,9 @@ def _govern_new_objects(session) -> None:
     # too so the tracked list is cleared and no per-object work happens.
 
     if service.disable_in_progress():
-        logger.info("superset_ownership: disable in progress; new objects left ungoverned")
+        logger.info(
+            "superset_ownership: disable in progress; new objects left ungoverned"
+        )
         return
 
     from superset.utils.core import get_user_id
@@ -240,12 +251,16 @@ def _govern_new_objects(session) -> None:
                 session.info.setdefault(_PENDING, []).append(
                     audit.build(
                         audit.OBJECT_CREATED,
-                        actor=security_manager.get_user_by_id(owner_user_id) if owner_user_id else None,
+                        actor=security_manager.get_user_by_id(owner_user_id)
+                        if owner_user_id
+                        else None,
                         asset_type=asset_type,
                         object_id=object_id,
                         object_uuid=str(getattr(obj, "uuid", "") or "") or None,
                         after={
-                            "visibility": "private" if owner_user_id is not None else "public",
+                            "visibility": "private"
+                            if owner_user_id is not None
+                            else "public",
                             "owner_user_id": owner_user_id,
                             "via": "flush guard",
                         },
@@ -254,12 +269,12 @@ def _govern_new_objects(session) -> None:
                 governed += 1
             except Exception:
                 logger.exception(
-                    "superset_ownership: could not govern new %s %s", asset_type, object_id
+                    "superset_ownership: could not govern new %s %s",
+                    asset_type,
+                    object_id,
                 )
     if governed:
         session.flush()
-
-
 
 
 def _protect_the_sentinel(session) -> None:
@@ -293,7 +308,9 @@ def _protect_the_sentinel(session) -> None:
                 subject = sentinel.get_sentinel_subject()
             except Exception:
                 continue
-            if subject is not None and getattr(obj, "id", None) == getattr(subject, "id", None):
+            if subject is not None and getattr(obj, "id", None) == getattr(
+                subject, "id", None
+            ):
                 raise ValueError(
                     "refusing to delete the ownership sentinel subject: it "
                     "carries denial for every private and shared object in "
@@ -334,8 +351,11 @@ def _before_flush(session, flush_context, instances) -> None:
     _note_new_objects(session)
     _protect_the_sentinel(session)
     _collect_deleted(session)
+    _follow_uuid_changes(session)
 
-    candidates = [o for o in session.dirty if _asset_type_of(o) and getattr(o, "id", None)]
+    candidates = [
+        o for o in session.dirty if _asset_type_of(o) and getattr(o, "id", None)
+    ]
     if not candidates:
         return
 
@@ -355,7 +375,8 @@ def _before_flush(session, flush_context, instances) -> None:
                 rows = service.lookup_many(asset_type, [o.id for o in objs], fresh=True)
             except Exception:
                 logger.exception(
-                    "superset_ownership: guard could not read ownership for %s", asset_type
+                    "superset_ownership: guard could not read ownership for %s",
+                    asset_type,
                 )
                 continue
             for obj in objs:
@@ -375,7 +396,9 @@ def _before_flush(session, flush_context, instances) -> None:
         try:
             subject = _sentinel_subject_cached(session)
         except Exception:
-            logger.exception("superset_ownership: could not resolve the sentinel subject")
+            logger.exception(
+                "superset_ownership: could not resolve the sentinel subject"
+            )
             return
         if subject is None:
             return
@@ -436,12 +459,11 @@ def _before_flush(session, flush_context, instances) -> None:
                     # let the write proceed -- worst case an already-stale
                     # native editors collection stays stale one more flush.
                     logger.exception(
-                        "superset_ownership: could not sync native editors for "
-                        "%s %s", asset_type, obj.id,
+                        "superset_ownership: could not sync native editors for %s %s",
+                        asset_type,
+                        obj.id,
                     )
-            after_editor_ids = (
-                {s.id for s in editors} if editors is not None else set()
-            )
+            after_editor_ids = {s.id for s in editors} if editors is not None else set()
             stripped = len(before_editor_ids - after_editor_ids)
             added = len(after_editor_ids - before_editor_ids)
 
@@ -457,7 +479,13 @@ def _before_flush(session, flush_context, instances) -> None:
                 "superset_ownership: access fields corrected on %s %s (%s) -- "
                 "denial restored=%s, direct viewers stripped=%d, direct editors "
                 "stripped=%d, direct editors added=%d",
-                asset_type, obj.id, row.visibility, rearmed, len(removed), stripped, added,
+                asset_type,
+                obj.id,
+                row.visibility,
+                rearmed,
+                len(removed),
+                stripped,
+                added,
             )
             # `enforced` in before reflects whether denial had actually been
             # removed; an editors-only correction leaves it True, which is how
@@ -484,6 +512,235 @@ def _before_flush(session, flush_context, instances) -> None:
                         "direct_editors": 0,
                     },
                 )
+            )
+
+
+def _same_table(a, b) -> bool:
+    """Are these two the same table, annotations aside?
+
+    `delete(Slice)` -- the ORM entity form, which is also what
+    `Query.delete()` compiles to -- carries its target as an
+    `AnnotatedTable`: `==` the plain `Table`, but not `is` it. An identity
+    check therefore declined EVERY entity-form delete as "spans 1 table",
+    which is how `superset/commands/security/reset.py` came to delete every
+    chart and dashboard while leaving every ownership row and every live
+    `viewer` tuple behind (review round 2). Compared deannotated, which is
+    what SQLAlchemy itself does to answer this question.
+    """
+    for side in (a, b):
+        if side is None:
+            return False
+    left = a._deannotate() if hasattr(a, "_deannotate") else a
+    right = b._deannotate() if hasattr(b, "_deannotate") else b
+    return left is right
+
+
+def _before_core_delete(state) -> None:
+    """Collect ownership for a chart or dashboard deleted by a Core statement.
+
+    `_collect_deleted` reads `session.deleted`, which only the ORM fills, so it
+    never saw the hard-delete path: `cascade_hard_delete` (the purge route and
+    the retention sweep both) removes the entity with `session.execute(
+    sa.delete(table)...)`, and a bulk `session.execute(sa.delete(Slice)...)`
+    does the same. The object went, its ownership row, its shares and all of
+    its tuples stayed -- two of them live `viewer` grants -- and `check` went
+    permanently red with nothing able to clear it (issue #120).
+
+    This runs BEFORE the delete statement executes, which is what makes it
+    correct rather than merely early: `cascade_hard_delete` does its work
+    inside a savepoint and rolls it back when it loses the race for the row,
+    and the ownership rows removed here are inside that same savepoint, so
+    they come back with it. The ids are read under the FOR UPDATE claim that
+    path already holds.
+
+    COST. This fires on every `Session.execute` in the application, so the
+    first thing it does is the cheapest question available: is this a DELETE
+    at all. Everything else is behind that. Measured at roughly 60ns on a
+    statement that is not a governed delete (review round 1).
+
+    IT MUST NOT RAISE. It sits between a caller and their own statement, so
+    anything it raises turns a legal DELETE into an error -- which review
+    round 1 demonstrated two ways: a whereclause carrying an unbound
+    `bindparam` (the parameters live on the execution, not the statement),
+    and any failure inside the collection itself. Both are now contained
+    here, on the same policy as the ORM path (`_collect_deleted`): a
+    `DBAPIError` has already aborted the transaction on PostgreSQL and is
+    re-raised where it happened; everything else is logged and the delete
+    goes ahead, leaving at worst the orphan that `check` reports as
+    `missing_object` and `reconcile --write` clears.
+    """
+    if not state.is_delete:
+        return
+    table = getattr(state.statement, "table", None)
+    asset_type = _GOVERNED_TABLES.get(getattr(table, "name", None))
+    if asset_type is None:
+        return
+
+    session = state.session
+    if session.info.get(_SUPPRESSED) or session.info.get(_IN_CORE_DELETE):
+        return
+
+    from sqlalchemy.exc import DBAPIError
+
+    session.info[_IN_CORE_DELETE] = True
+    try:
+        # In a SAVEPOINT of its own, so that containing a failure contains
+        # ALL of it. The collection removes the local rows first and only
+        # then invalidates the cache and enqueues the store purge; without
+        # this, a failure in one of those later steps left the earlier ones
+        # committed -- the object gone, the row gone, and the store still
+        # holding `owner` and `viewer`, which nothing can then detect
+        # because `check` and `reconcile` both enumerate from
+        # `ownership_object` (review round 2).
+        #
+        # On the CONNECTION, and with autoflush off, not
+        # `session.begin_nested()` (review round 3).
+        # `SessionTransaction._take_snapshot` runs a full `session.flush()`
+        # before the SAVEPOINT is emitted, so the session form made this
+        # listener flush the caller's entire pending unit of work in front
+        # of every governed Core DELETE -- a statement that autoflushes
+        # nothing on its own. When that flush failed, the `IntegrityError`
+        # is a `DBAPIError`, so the re-raise below carried it out of the
+        # caller's own `session.execute(delete(...))` and left the Session
+        # deactivated; `cascade_hard_delete` then reported the entity as
+        # blocked by a cascade integrity constraint, which it was not. The
+        # same idiom, and the same reason, as
+        # `superset/versioning/baseline/insertion.py`.
+        with session.no_autoflush, session.connection().begin_nested():
+            _collect_core_deleted(state, session, table, asset_type)
+    except DBAPIError:
+        raise
+    except Exception:  # noqa: BLE001 - never turn someone else's DELETE into an error
+        logger.exception(
+            "superset_ownership: could not collect ownership for a %s delete; the "
+            "delete proceeds and the row is `reconcile`'s to sweep",
+            asset_type,
+        )
+    finally:
+        session.info.pop(_IN_CORE_DELETE, None)
+
+
+def _collect_core_deleted(state, session, table, asset_type: str) -> None:
+    """`_before_core_delete`'s body, wrapped by its caller's guard."""
+    from sqlalchemy import select
+
+    from superset_ownership.hooks import after_asset_delete
+
+    id_column = table.c.get("id")
+    if id_column is None:  # pragma: no cover - neither table is without one
+        return
+    uuid_column = table.c.get("uuid")
+    columns = [id_column] + ([uuid_column] if uuid_column is not None else [])
+
+    statement = state.statement
+    lookup = select(*columns)
+    if statement.whereclause is not None:
+        lookup = lookup.where(statement.whereclause)
+
+    # A whereclause that drags in another table would make this SELECT a
+    # cartesian product, and its ids would name objects the DELETE does not
+    # touch. PostgreSQL compiles such a DELETE as `DELETE ... USING`, which
+    # is legal, so this is a real statement shape and not a theoretical one
+    # (review round 1). Refuse to guess: say so and collect nothing, which
+    # leaves exactly the orphan `check` already reports.
+    froms = lookup.get_final_froms()
+    if len(froms) != 1 or not _same_table(froms[0], table):
+        logger.warning(
+            "superset_ownership: a %s DELETE whose criteria spans %d table(s) was not "
+            "collected; run `ownership reconcile --write` afterwards",
+            asset_type,
+            len(froms),
+        )
+        return
+
+    # The parameters live on the EXECUTION, not on the statement: re-running
+    # the whereclause without them raises `A value is required for bind
+    # parameter` and, from inside the event, kills the caller's DELETE
+    # (review round 1). `bind_arguments` and `execution_options` carry the
+    # bind and the schema translation for the same reason.
+    parameters = state.parameters
+    execution_options = dict(state.execution_options or {})
+    bind_arguments = dict(state.bind_arguments or {})
+
+    def _ids(params):
+        return session.execute(
+            lookup,
+            params,
+            execution_options=execution_options,
+            bind_arguments=bind_arguments,
+        ).all()
+
+    if isinstance(parameters, (list, tuple)):
+        # executemany: one DELETE per parameter set, so one id set per set.
+        doomed = [row for params in parameters for row in _ids(params)]
+    else:
+        doomed = _ids(parameters)
+
+    # Same (asset_type, object_id) order as the ORM path, for the same
+    # reason: two bulk deletes over overlapping sets must not each hold a
+    # row the other waits for. De-duplicated because an executemany can name
+    # the same row twice.
+    seen: set = set()
+    for row in sorted(doomed, key=lambda r: r[0]):
+        if row[0] in seen:
+            continue
+        seen.add(row[0])
+        uuid = str(row[1]) if len(row) > 1 and row[1] else None
+        # NOT under this module's per-object advisory lock, unlike every
+        # other write: `cascade_hard_delete` already holds the asset row
+        # `FOR UPDATE` before it issues the statement we are standing in
+        # front of, so taking our lock here would be the one place in the
+        # module that takes it AFTER the asset row -- the ABBA against the
+        # visibility route, which takes ours first and touches the asset
+        # row second (review round 1). The DELETEs below take their own row
+        # locks, and this path's intents are the last ones the object will
+        # ever have.
+        after_asset_delete(asset_type, row[0], uuid, lock=False)
+
+
+def _follow_uuid_changes(session) -> None:
+    """Re-point ownership at a governed object whose uuid changed in place.
+
+    Superset's dashboard import validates collisions by uuid but resolves by
+    `slug`, so an import can replace a LIVE dashboard and give it the
+    imported file's uuid (issue #127). Nothing else in Superset rewrites a
+    uuid, so this is cheap: the attribute history of the objects already
+    known to be dirty, and a re-point only when one actually moved.
+
+    The store is addressed by uuid, so the tuples move with the row -- see
+    `service.repoint_object_uuid`, which does the work in this same
+    transaction, so an import that rolls back takes the re-point with it.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from superset_ownership import service
+
+    for obj in session.dirty:
+        asset_type = _asset_type_of(obj)
+        if asset_type is None or getattr(obj, "id", None) is None:
+            continue
+        try:
+            history = sa_inspect(obj).attrs.uuid.history
+        except Exception:  # noqa: BLE001 - a model without the attribute
+            continue
+        if not history.has_changes() or not history.deleted:
+            continue
+        old_uuid = str(history.deleted[0]) if history.deleted[0] else None
+        new_uuid = str(getattr(obj, "uuid", "") or "")
+        if not new_uuid or old_uuid == new_uuid:
+            continue
+        try:
+            service.repoint_object_uuid(asset_type, obj.id, old_uuid, new_uuid)
+        except Exception:
+            # Never break the write that carried the change: the divergence
+            # is reported by `check` (uuid_divergence) and repairable by
+            # `reconcile --write`.
+            logger.exception(
+                "superset_ownership: could not follow %s %s from uuid %s to %s",
+                asset_type,
+                obj.id,
+                old_uuid,
+                new_uuid,
             )
 
 
@@ -529,8 +786,11 @@ def _collect_deleted(session) -> None:
             # to sweep. (The ownership tables missing after a teardown is
             # not this case: Postgres reports it as UndefinedTable, a
             # database error, and it surfaces through the branch above.)
-            logger.exception("superset_ownership: could not collect deleted %s %s",
-                             asset_type, object_id)
+            logger.exception(
+                "superset_ownership: could not collect deleted %s %s",
+                asset_type,
+                object_id,
+            )
 
 
 def _sentinel_subject_cached(session):
@@ -637,11 +897,15 @@ def _after_rollback(session, previous_transaction=None) -> None:
     # object, keeping everything governed a nonexistent one. The row cache's
     # pending replay stays for the same reason; only the request-local rows
     # go, since one read inside the savepoint may hold what it discarded.
-    if previous_transaction is not None and getattr(previous_transaction, "nested", False):
+    if previous_transaction is not None and getattr(
+        previous_transaction, "nested", False
+    ):
         try:
             service.discard_invalidations(savepoint=True)
         except Exception:  # noqa: BLE001
-            logger.exception("superset_ownership: discarding cache invalidations failed")
+            logger.exception(
+                "superset_ownership: discarding cache invalidations failed"
+            )
         return
     session.info.pop(_PENDING, None)
     session.info.pop(_NEW_ASSETS, None)
@@ -696,7 +960,8 @@ def _before_user_delete(mapper, connection, target) -> None:
                 "superset_ownership: user %s is being deleted while %s does not "
                 "exist (the ownership chain has not run, or was torn down); "
                 "nothing to record",
-                user_id, ownership_object.name,
+                user_id,
+                ownership_object.name,
             )
             return
         with connection.begin_nested():
@@ -707,20 +972,23 @@ def _before_user_delete(mapper, connection, target) -> None:
                     ownership_object.c.object_uuid,
                 )
                 .where(ownership_object.c.owner_user_id == user_id)
-                .order_by(
-                    ownership_object.c.asset_type, ownership_object.c.object_id
-                )
+                .order_by(ownership_object.c.asset_type, ownership_object.c.object_id)
             ).all()
     except Exception:  # noqa: BLE001 - a fault here must not stop the delete
-        logger.warning("superset_ownership: could not read owned objects of user %s",
-                       user_id, exc_info=True)
+        logger.warning(
+            "superset_ownership: could not read owned objects of user %s",
+            user_id,
+            exc_info=True,
+        )
         return
     if not rows:
         return
     logger.warning(
         "superset_ownership: hard delete of user %s un-owns %d object(s) (the owner "
         "foreign key sets them NULL); one %s event per object: %s",
-        user_id, len(rows), audit.OWNER_REMOVED_BY_USER_DELETE,
+        user_id,
+        len(rows),
+        audit.OWNER_REMOVED_BY_USER_DELETE,
         [f"{r[0]}:{r[1]}" for r in rows[:20]],
     )
     actor = _request_actor()
@@ -763,15 +1031,17 @@ def _user_model():
         if model is not None:
             return model
     except Exception:  # noqa: BLE001 - no real Superset here; try FAB directly
-        logger.debug("superset_ownership: no security_manager.user_model",
-                     exc_info=True)
+        logger.debug(
+            "superset_ownership: no security_manager.user_model", exc_info=True
+        )
     try:
         from flask_appbuilder.security.sqla.models import User
 
         return User
     except Exception:  # noqa: BLE001
-        logger.debug("superset_ownership: flask_appbuilder not importable",
-                     exc_info=True)
+        logger.debug(
+            "superset_ownership: flask_appbuilder not importable", exc_info=True
+        )
         return None
 
 
@@ -785,6 +1055,7 @@ def install() -> None:
     from superset import db
 
     event.listen(db.session, "before_flush", _before_flush)
+    event.listen(db.session, "do_orm_execute", _before_core_delete)
     event.listen(db.session, "before_commit", _before_commit)
     event.listen(db.session, "after_commit", _after_commit)
     event.listen(db.session, "after_soft_rollback", _after_rollback)

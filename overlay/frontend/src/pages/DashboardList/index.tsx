@@ -97,6 +97,7 @@ import type { OwnershipListItem } from 'src/features/ownership/types';
 import VisibilityTag from 'src/features/ownership/VisibilityTag';
 import SharingDrawer from 'src/features/ownership/SharingDrawer';
 import OwnerCell from 'src/features/ownership/OwnerCell';
+import OwnershipUnavailableAlert from 'src/features/ownership/OwnershipUnavailableAlert';
 
 const PAGE_SIZE = 25;
 const PASSWORDS_NEEDED_MESSAGE = t(
@@ -241,6 +242,10 @@ function DashboardList(props: DashboardListProps) {
   const [ownershipById, setOwnershipById] = useState<
     Record<number, OwnershipListItem>
   >({});
+  // Issue #122: an empty map and a map of genuinely unowned objects render
+  // identically -- every row "Unknown". The page has to be able to say which
+  // one this is, so the failure is state, not just an empty result.
+  const [ownershipUnavailable, setOwnershipUnavailable] = useState(false);
   const [dashboardToShare, setDashboardToShare] = useState<Dashboard | null>(
     null,
   );
@@ -250,11 +255,17 @@ function DashboardList(props: DashboardListProps) {
   const loadOwnership = useCallback(() => {
     if (!ownershipEnabled) return;
     fetchOwnershipList('dashboard')
-      .then(setOwnershipById)
+      .then(rows => {
+        setOwnershipById(rows);
+        setOwnershipUnavailable(false);
+      })
       .catch(() => {
         // Ownership state is unreadable (feature off, or the endpoint is
-        // down). Show Unknown and no sharing controls -- never a guess.
+        // down). Show Unknown and no sharing controls -- never a guess --
+        // and say so above the list, because "Unknown" on every row is
+        // otherwise indistinguishable from the truth (issue #122).
         setOwnershipById({});
+        setOwnershipUnavailable(true);
       });
   }, [ownershipEnabled]);
 
@@ -710,7 +721,10 @@ function DashboardList(props: DashboardListProps) {
         },
         Header: t('Actions'),
         id: 'actions',
-        hidden: !canEdit && !canDelete && !canExport,
+        // Issue #123: ownership is a fourth reason to render this column --
+        // a user who may manage an object's sharing but holds none of
+        // edit/delete/export lost the Sharing control with the whole column.
+        hidden: !canEdit && !canDelete && !canExport && !ownershipEnabled,
         disableSortBy: true,
       },
       {
@@ -732,6 +746,7 @@ function DashboardList(props: DashboardListProps) {
       handleBulkDashboardExport,
       openDashboardEditModal,
       getOwnership,
+      ownershipEnabled,
     ],
   );
 
@@ -986,6 +1001,10 @@ function DashboardList(props: DashboardListProps) {
             </Button>
           ) : undefined
         }
+      />
+      <OwnershipUnavailableAlert
+        unavailable={ownershipUnavailable}
+        onRetry={loadOwnership}
       />
       <ConfirmStatusChange
         recoverable={softDelete}

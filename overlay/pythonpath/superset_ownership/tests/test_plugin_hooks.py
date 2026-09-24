@@ -693,6 +693,24 @@ def test_narrow_manage_reason_none_is_honoured():
     assert plugin_hooks.narrow_manage_reason(None, "owner") is None
 
 
+def test_narrow_manage_reason_cannot_take_the_admin_ground(caplog):
+    """Issue #126: the one ground a customer hook may not remove, whether it
+    answered `None` deliberately or was answered `None` for it by `call()`'s
+    fail-closed unknown after it raised."""
+    with caplog.at_level(logging.ERROR, logger="superset_ownership.plugin_hooks"):
+        assert plugin_hooks.narrow_manage_reason(None, "admin") == "admin"
+    assert any("not narrowable" in rec.getMessage() for rec in caplog.records)
+    assert plugin_hooks.narrow_manage_reason("admin", "admin") == "admin"
+    # A reason the hook invented over an admin default is not honoured either.
+    assert plugin_hooks.narrow_manage_reason("owner", "admin") == "admin"
+
+
+def test_the_admin_reason_is_spelled_the_same_in_both_modules():
+    from superset_ownership import api
+
+    assert plugin_hooks.MANAGE_REASON_ADMIN == api.MANAGE_REASON_ADMIN
+
+
 def test_narrow_manage_reason_same_as_default_is_honoured():
     assert plugin_hooks.narrow_manage_reason("owner", "owner") == "owner"
 
@@ -993,15 +1011,21 @@ def test_can_manage_hook_widening_is_ignored_and_logged_on_the_share_route(
             )
 
 
-def test_can_manage_hook_raising_denies_everyone_including_an_admin(harness, caplog):
-    """M-4: a raising OWNERSHIP_CAN_MANAGE is NOT "no narrowing" in the
-    sense of "the default still stands" -- `call()`'s fail-closed unknown
-    is `None`, and `narrow_manage_reason(None, default_reason)` returns
-    `None` unconditionally, denying EVERY caller for that object, the owner
-    and a Superset admin included. Route-level proof, not just the unit
-    test on `narrow_manage_reason` itself; the log carries the exception
-    class only, never its message."""
+def test_can_manage_hook_raising_denies_the_owner_but_not_the_admin(harness, caplog):
+    """M-4, amended by issue #126. A raising OWNERSHIP_CAN_MANAGE is still
+    NOT "no narrowing": `call()`'s fail-closed unknown is `None`, so the
+    OWNER the default admitted is denied, and so is every tenant
+    administrator and permission holder -- a bug in one hook must not keep
+    granting what only the default granted.
+
+    The Superset admin is the exception. One broken line in a customer's
+    config used to lock the whole instance out of every ownership action,
+    and the admin is who removes that line; denying them left no way back.
+    Route-level proof, not just the unit test on `narrow_manage_reason`; the
+    log carries the exception class only, never its message.
+    """
     from flask import current_app
+
     from superset_ownership import plugins
 
     tenant = "c0ffee00-0000-4000-8000-000000000005"
@@ -1012,6 +1036,7 @@ def test_can_manage_hook_raising_denies_everyone_including_an_admin(harness, cap
     admin = harness.add_person("hookcmraise2", "HookCmRaise2", "Gamma", "Admin", role)
     target = harness.add_person("hookcmraise3", "HookCmRaise3", "Gamma", role)
     chart = harness.create_chart(owner, "hook-can-manage-raises")
+    harness.set_visibility(owner, chart, "shared")
 
     def raising_hook(user, object_state):
         raise RuntimeError("super-secret-connection-string")
@@ -1026,16 +1051,63 @@ def test_can_manage_hook_raising_denies_everyone_including_an_admin(harness, cap
                 f"/api/v1/ownership/chart/{chart.id}/shares",
                 {"subject": target.ref, "role": "viewer"},
             )
-            r_admin = harness.post(
+            # The visibility route, because it is manage-gated and carries no
+            # subject: what is under test is the GROUND, not the recipient.
+            r_admin = harness.put(
                 admin,
-                f"/api/v1/ownership/chart/{chart.id}/shares",
-                {"subject": target.ref, "role": "viewer"},
+                f"/api/v1/ownership/chart/{chart.id}/visibility",
+                {"visibility": "private"},
             )
         assert r_owner.status_code == 403, (r_owner.status_code, r_owner.get_json())
-        assert r_admin.status_code == 403, (r_admin.status_code, r_admin.get_json())
+        assert r_admin.status_code == 200, (r_admin.status_code, r_admin.get_json())
         messages = [rec.getMessage() for rec in caplog.records]
         assert any("RuntimeError" in m for m in messages)
         assert not any("super-secret-connection-string" in m for m in messages)
+        assert any("not narrowable" in m for m in messages), (
+            "and it says loudly why the admin still got through"
+        )
+    finally:
+        with harness.ctx():
+            current_app.extensions[plugins.EXT_KEY].hooks.callables.pop(
+                "OWNERSHIP_CAN_MANAGE", None
+            )
+
+
+def test_a_deliberate_denial_does_not_take_the_admin_ground_either(harness):
+    """The carve-out is the GROUND, not the failure mode: a hook that answers
+    `None` cleanly is exercising exactly the power a raising one exercises by
+    accident, and the same reasoning applies -- the customer narrows their own
+    users, not the instance's operator."""
+    from flask import current_app
+
+    from superset_ownership import plugins
+
+    tenant = "c0ffee00-0000-4000-8000-00000000000a"
+    role = f"tenant_{tenant}"
+    owner = harness.add_person(
+        "hookcmdeny1", "HookCmDeny1", "Gamma", "sales_readers", role
+    )
+    admin = harness.add_person("hookcmdeny2", "HookCmDeny2", "Gamma", "Admin", role)
+    target = harness.add_person("hookcmdeny3", "HookCmDeny3", "Gamma", role)
+    chart = harness.create_chart(owner, "hook-can-manage-denies")
+    harness.set_visibility(owner, chart, "shared")
+
+    with harness.ctx():
+        reg = current_app.extensions[plugins.EXT_KEY]
+        reg.hooks.callables["OWNERSHIP_CAN_MANAGE"] = lambda user, object_state: None
+    try:
+        r_owner = harness.post(
+            owner,
+            f"/api/v1/ownership/chart/{chart.id}/shares",
+            {"subject": target.ref, "role": "viewer"},
+        )
+        r_admin = harness.put(
+            admin,
+            f"/api/v1/ownership/chart/{chart.id}/visibility",
+            {"visibility": "private"},
+        )
+        assert r_owner.status_code == 403, (r_owner.status_code, r_owner.get_json())
+        assert r_admin.status_code == 200, (r_admin.status_code, r_admin.get_json())
     finally:
         with harness.ctx():
             current_app.extensions[plugins.EXT_KEY].hooks.callables.pop(

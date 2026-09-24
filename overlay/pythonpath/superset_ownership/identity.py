@@ -347,6 +347,27 @@ def group_id_format() -> str:
 # apart from the reference syntax around it.
 _GROUP_NAME_FORBIDDEN_RE = re.compile(r"[\s:#]")
 
+# The same rule as `group_id`'s own guard, as a question rather than a raise:
+# the API needs to answer 400 for a malformed group id, and a ValueError
+# escaping from a helper became a 500 (issue #124).
+_GROUP_NAME_MAX = 200
+
+
+def group_name_error(name: str) -> Optional[str]:
+    r"""Why this group name cannot be part of an id, or None if it can.
+
+    `\s` covers the non-breaking space too (Python's `re` is Unicode-aware
+    by default for `str` patterns), which is how a name copied out of the
+    picker's display text arrives.
+    """
+    if not name:
+        return "group name is empty"
+    if _GROUP_NAME_FORBIDDEN_RE.search(name):
+        return "group name may not contain whitespace, ':' or '#'"
+    if len(name) > _GROUP_NAME_MAX:
+        return f"group name is longer than {_GROUP_NAME_MAX} characters"
+    return None
+
 
 def _get_hook(name: str) -> Optional[Any]:
     """The resolved `OWNERSHIP_*` hook callable, or None -- mirrors

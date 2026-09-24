@@ -825,6 +825,7 @@ export default function SharingDrawer({
           exclude={excludeFromSharePicker}
           initiallySelected={shares}
           lockedReason={lockedShareReason}
+          object={`${assetType}:${objectId}`}
           onCancel={() => setView('main')}
           onOk={handleSubjectsSelected}
         />
@@ -849,6 +850,7 @@ export default function SharingDrawer({
           kinds={USERS_ONLY}
           selectionMode="single"
           exclude={isCurrentOwner}
+          object={`${assetType}:${objectId}`}
           initiallySelected={transferTarget ? [transferTarget] : []}
           okLabel={t('Continue')}
           onCancel={() => setView('main')}

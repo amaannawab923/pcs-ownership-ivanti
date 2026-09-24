@@ -96,6 +96,10 @@ export interface SubjectPickerPanelProps {
   // row the caller may change. Share picker only.
   lockedReason?: (option: OwnershipSubjectOption) => string | null;
   okLabel?: string;
+  // The object being shared, as '<assetType>:<id>'. Passed straight through
+  // to /subjects, which uses it only for a caller with no tenant of their own
+  // (issue #125): a Superset admin's picker would otherwise always be empty.
+  object?: string;
 }
 
 const NONE_LOCKED = () => null;
@@ -109,6 +113,7 @@ export default function SubjectPickerPanel({
   exclude = OFFER_ALL,
   lockedReason = NONE_LOCKED,
   okLabel,
+  object,
 }: SubjectPickerPanelProps) {
   const theme = useTheme();
   const single = selectionMode === 'single';
@@ -136,7 +141,7 @@ export default function SubjectPickerPanel({
     let cancelled = false;
     setLoading(true);
     const timeout = setTimeout(() => {
-      searchSubjects(query)
+      searchSubjects(query, object)
         .then(response => {
           if (cancelled) return;
           setResults(response.result);
@@ -157,7 +162,7 @@ export default function SubjectPickerPanel({
       cancelled = true;
       clearTimeout(timeout);
     };
-  }, [query]);
+  }, [query, object]);
 
   const offered = useMemo(
     () => results.filter(r => kinds.includes(r.extra.type) && !exclude(r)),

@@ -412,16 +412,27 @@ def test_the_backfill_upserts_a_sweep_in_asset_type_then_id_order(monkeypatch):
     superset.db.session.commit.assert_called_once()
 
 
-def test_the_guard_never_locks_and_the_service_locks_only_in_the_upsert():
+def test_the_guard_never_locks_and_the_service_locks_only_where_it_writes():
     """The flush guard runs on EVERY flush in the application and reads the
-    row to defend the sentinel; it must not lock. In service.py the only
-    caller is upsert_ownership (which updates an existing row) -- the read
-    paths lookup / lookup_many / list_rows / the share readers never do."""
+    row to defend the sentinel; that READ must not lock. In service.py only
+    the two functions that WRITE a row take it -- the read paths lookup /
+    lookup_many / list_rows / the share readers never do.
+
+    The guard reaches a locking function on two paths, both of which are
+    writes it is carrying out rather than reads it is making, and both of
+    which take the lock in the same (asset_type, object_id) order every bulk
+    path uses: `hooks.after_asset_delete` (an object being deleted) and
+    `service.repoint_object_uuid` (an object whose uuid changed under us,
+    issue #127). Neither runs on an ordinary flush."""
     assert _callers_of("guard.py", "lock_object") == {}
     # Twice in upsert_ownership: before deciding INSERT vs UPDATE, and
     # again when the INSERT lost a race to another creator (the re-lock
-    # finds and holds that creator's row).
-    assert _callers_of("service.py", "lock_object") == {"upsert_ownership": 2}
+    # finds and holds that creator's row). Once in repoint_object_uuid,
+    # which rewrites the row's uuid and re-queues every tuple under it.
+    assert _callers_of("service.py", "lock_object") == {
+        "upsert_ownership": 2,
+        "repoint_object_uuid": 1,
+    }
 
 
 def test_the_outbox_docstring_names_the_lock_as_the_ordering_guarantee():

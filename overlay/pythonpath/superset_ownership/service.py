@@ -201,6 +201,34 @@ def administered_tenant(user: Any) -> Optional[str]:
     return answer
 
 
+def forget_administered_tenant(user_id: int) -> bool:
+    """Drop the cached "yes, administers <tenant>" for one user.
+
+    `administered_tenant` caches a positive answer in the shared layer for
+    `OWNERSHIP_LOOKUP_CACHE_TTL` seconds and nothing invalidates it, so a
+    tenant administrator the platform has just demoted keeps reading that
+    tenant's private objects until the entry ages out (issue #130). The TTL
+    is the bound; this is the way to not wait for it.
+
+    TWO keys, in this order (review round 1). The derived answer is
+    recomputed from `is_tenant_administrator`, and where a deployment
+    configures `OWNERSHIP_IS_TENANT_ADMINISTRATOR` that hook's own answer is
+    cached in the same shared layer under its own key. Dropping only the
+    derived one meant the recompute read the stale hook answer and re-cached
+    the same "yes" with a fresh full TTL -- the command made the problem
+    last longer. The hook key goes first: a request landing between the two
+    reads the derived answer it would have read anyway, and cannot
+    republish it from a stale hook.
+    """
+    from superset_ownership import plugin_hooks
+
+    hook_dropped = plugin_hooks.cache_forget(
+        "OWNERSHIP_IS_TENANT_ADMINISTRATOR", user_id
+    )
+    derived_dropped = plugin_hooks.cache_forget(_ADMINISTERED_TENANT_SETTING, user_id)
+    return hook_dropped or derived_dropped
+
+
 def tenant_admin_reads(row: "OwnershipRow", user: Any) -> bool:
     """May this caller read the object because they administer its tenant?
 
@@ -1569,6 +1597,109 @@ def _update_ownership(
     )
 
 
+def repoint_object_uuid(
+    asset_type: str, object_id: int, old_uuid: Optional[str], new_uuid: str
+) -> bool:
+    """Follow an object whose uuid changed under us, taking its grants along.
+
+    Superset's dashboard import validates collisions by uuid but resolves by
+    `slug`, so an import can replace a LIVE dashboard in place and re-point
+    `dashboards.uuid` (issue #127). The ownership row, and every tuple in the
+    authorization store, then described an object with a uuid nothing has:
+    the owner kept the row, the store kept grants under a reference that no
+    longer resolves, and `check` reported ok.
+
+    The store is addressed BY uuid, so following the object means moving its
+    tuples: purge the old reference and re-queue what the rows say -- the
+    owner, the tenant and every share -- under the new one. All of it rides
+    the caller's transaction, as every other write in this module does, so a
+    rolled-back import takes the re-point with it.
+
+    Returns whether anything was re-pointed.
+    """
+    if not new_uuid or old_uuid == new_uuid:
+        return False
+
+    db = _db()
+    row = lock_object(asset_type, object_id)
+    if row is None:
+        return False
+    # Guard against a stale caller: only follow the object when the row is
+    # actually pointing at the uuid it just left.
+    if old_uuid is not None and row.object_uuid and row.object_uuid != old_uuid:
+        return False
+
+    from superset_ownership import outbox
+    from superset_ownership.identity import member_ref
+
+    # Only where the store files relationships under the object's uuid.
+    # On a backend keyed by object id -- the local one -- the relationships
+    # are the share rows themselves: they do not move when the uuid does, so
+    # there is nothing to purge, and purging would resolve the STALE uuid to
+    # whatever row still holds it and delete that object's shares instead
+    # (review round 3).
+    by_uuid = getattr(get_authorizer(), "addresses_objects_by_uuid", True)
+    stale = row.object_uuid or old_uuid
+    if stale and by_uuid:
+        outbox.purge_object(asset_type, stale)
+
+    db.session.execute(
+        ownership_object.update()
+        .where(
+            ownership_object.c.asset_type == asset_type,
+            ownership_object.c.object_id == object_id,
+        )
+        .values(object_uuid=new_uuid)
+    )
+    invalidate(asset_type, object_id)
+
+    obj = f"{asset_type}:{new_uuid}"
+    if not by_uuid:
+        # Nothing was purged and nothing needs re-writing: the rows this
+        # backend answers from are keyed by object id and already correct.
+        logger.info(
+            "superset_ownership: %s %s changed uuid %s -> %s; the store is keyed by "
+            "object id, so its relationships did not move",
+            asset_type,
+            object_id,
+            stale,
+            new_uuid,
+        )
+        return True
+    if row.owner_user_id:
+        subject = member_ref(row.owner_user_id)
+        if subject:
+            outbox.write_tuple(subject, "owner", obj)
+    if getattr(row, "tenant_guid", None):
+        # BY ID. This function exists to repair rows whose uuid disagrees
+        # with the world, so it is the last place that may address a row by
+        # uuid: `object_uuid` is not unique, and a divergence is precisely
+        # the state where two rows can hold the same one (review round 2).
+        outbox.set_object_tenant(
+            asset_type, new_uuid, row.tenant_guid, object_id=object_id
+        )
+    for share in (
+        db.session.execute(
+            select(ownership_share).where(
+                ownership_share.c.asset_type == asset_type,
+                ownership_share.c.object_id == object_id,
+            )
+        )
+        .mappings()
+        .all()
+    ):
+        outbox.write_tuple(share["subject"], share["role"], obj)
+
+    logger.info(
+        "superset_ownership: %s %s changed uuid %s -> %s; ownership followed it",
+        asset_type,
+        object_id,
+        stale,
+        new_uuid,
+    )
+    return True
+
+
 def upsert_ownership(
     asset_type: str,
     object_id: int,
@@ -2655,18 +2786,52 @@ def remove_share(
 
 
 def lookup_by_uuid(asset_type: str, object_uuid: str) -> Optional[OwnershipRow]:
-    r = (
+    """The row a store reference names, or None -- INCLUDING when more than
+    one row could answer to it.
+
+    `ownership_object.object_uuid` carries no unique constraint, and a
+    `uuid_divergence` (a row whose uuid the live object no longer has) is
+    exactly the state in which two rows hold one uuid. This is the READ side
+    of the bystander class the write sides were fixed for, and on the
+    default backend it is the one that decides access: `LocalAuthorizer`
+    resolves every object reference through here, so an unordered `.first()`
+    handed the reference to whichever row the database felt like returning
+    (review round 5). Measured on two rows sharing a uuid: the read gate
+    allowed a user on an object never shared with them; the drain wrote a
+    share row onto a bystander, purged a bystander's shares, and -- worst --
+    delivered a REVOCATION to the bystander, so the subject it was meant to
+    cut off kept their grant while the outbox row was marked delivered and
+    `has_pending_revocation` stopped denying it.
+
+    Ambiguity is therefore answered as "no row", not as "a row": every
+    caller already handles None, and on this path None denies, refuses, or
+    skips. `check` reports the divergence that caused it
+    (`uuid_divergence`), and `reconcile --write` repairs it.
+    """
+    rows = (
         _db()
         .session.execute(
-            select(ownership_object).where(
+            select(ownership_object)
+            .where(
                 ownership_object.c.asset_type == asset_type,
                 ownership_object.c.object_uuid == object_uuid,
             )
+            .limit(2)
         )
         .mappings()
-        .first()
+        .all()
     )
-    return OwnershipRow(**r) if r else None
+    if len(rows) > 1:
+        logger.error(
+            "superset_ownership: %s:%s names %d ownership rows; refusing to guess which "
+            "one it is. Run `superset ownership check` (uuid_divergence) and "
+            "`reconcile --write`",
+            asset_type,
+            object_uuid,
+            len(rows),
+        )
+        return None
+    return OwnershipRow(**rows[0]) if rows else None
 
 
 def add_share_row(asset_type: str, object_id: int, subject: str, role: str) -> None:

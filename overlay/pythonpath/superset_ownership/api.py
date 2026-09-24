@@ -262,7 +262,10 @@ def _validate_subject(
     three cases, and its duration would tell a refused caller which case
     the subject fell in -- the bit the held verdict keeps from them.
     """
-    if not subject or ":" not in subject:
+    # The type guard comes first: `":" not in subject` raises on an int and
+    # the route answered 500 for `{"subject": 123}` (issue #128), while every
+    # sibling wrong type answered a clean 400.
+    if not isinstance(subject, str) or not subject or ":" not in subject:
         return False, "subject must be 'user:<guid>' or 'group:<name>#member'"
 
     kind, _, rest = subject.partition(":")
@@ -393,6 +396,7 @@ def _validate_user_subject_unguarded(
         normalize_subject,
         resolve_member_guid,
         resolve_tenant_guid,
+        split_subject_id,
         subject_ids_match,
         user_for_member_guid,
     )
@@ -401,10 +405,23 @@ def _validate_user_subject_unguarded(
     if canonical is None:
         return False, "subject does not name a known account"
     if not tenant:
-        if not _GUID_RE.fullmatch(ref) and not ref.isdigit() and "@" not in ref:
+        # The caller has no tenant to check membership against (a Superset
+        # admin). All that is left is a sanity check on the shape -- and it
+        # has to accept the CANONICAL spelling, `user:<tenant>.<member>`,
+        # which is what this module's own picker emits and what the store
+        # holds. Refusing it left the admin able to use only the bare
+        # `user:<guid>` form, which no part of the UI produces (issue #125).
+        _subject_tenant, member = split_subject_id(ref)
+        if (
+            not member
+            or not _GUID_RE.fullmatch(member)
+            and not member.isdigit()
+            and "@" not in member
+        ):
             return (
                 False,
-                "user subject must be a GUID v4, a Superset user id or an email",
+                "user subject must be a GUID v4, a Superset user id or an email, "
+                "optionally tenant-qualified as '<tenant>.<member>'",
             )
         return True, ""
 
@@ -483,11 +500,35 @@ def _group_tenant_from_store(name: str) -> Optional[str]:
         return None
 
 
+# A group is only ever a subject in its userset form: the store accepts
+# `group:<id>#member`, never the bare object `group:<id>`. Issue #118: the
+# bare form was accepted here, written to the mirror, answered 200, and then
+# rejected by OpenFGA -- and the dead outbox row blocked every later intent
+# for that object, with no operator escape.
+GROUP_SUBJECT_RELATION = "member"
+_GROUP_SUBJECT_SHAPE = (
+    "a group subject must name its member set, e.g. 'group:<id>#member'"
+)
+
+
 def _validate_group_subject(
     rest: str, tenant: Optional[str], store: bool
 ) -> tuple[Optional[bool], str]:
     """The `group:` half of `_validate_subject`."""
-    name = rest.split("#", 1)[0]
+    name, sep, relation = rest.partition("#")
+    if not sep or relation != GROUP_SUBJECT_RELATION:
+        return False, _GROUP_SUBJECT_SHAPE
+    if not name:
+        return False, _GROUP_SUBJECT_SHAPE
+    # Issue #124: a name carrying whitespace, a non-breaking space or `:`
+    # raised out of `identity.group_id` further down and the route answered
+    # 500. The picker's own display text is the spaced name, so this is one
+    # paste away; it is a malformed id, and it is a 400.
+    from superset_ownership.identity import group_name_error
+
+    bad = group_name_error(name)
+    if bad is not None:
+        return False, bad
     # The tenant is part of the group id, in whichever position
     # OWNERSHIP_GROUP_ID_FORMAT puts it; the helper is the only thing that
     # knows which.
@@ -1938,7 +1979,10 @@ def _set_asset_visibility(asset_type: str, pk: int):
 
     payload = request.get_json(silent=True) or {}
     visibility = payload.get("visibility")
-    if visibility not in VALID_VISIBILITIES:
+    # `in` against a set raises on an unhashable body value (a list, a dict);
+    # the route answered 500 for `{"visibility": ["private"]}` while every
+    # other wrong type answered 400 (QA pass 1).
+    if not isinstance(visibility, str) or visibility not in VALID_VISIBILITIES:
         return _err(400, f"visibility must be one of {sorted(VALID_VISIBILITIES)}")
     if visibility == "public" and admitted_by == MANAGE_REASON_MANAGE_PERMISSION:
         # The one action in the set that widens READ access, for everybody
@@ -2029,7 +2073,9 @@ def _set_asset_visibility(asset_type: str, pk: int):
         if subject:
             outbox.write_tuple(subject, "owner", f"{asset_type}:{asset.uuid}")
         if tenant_guid and not obj_tenant:
-            outbox.set_object_tenant(asset_type, str(asset.uuid), tenant_guid)
+            outbox.set_object_tenant(
+                asset_type, str(asset.uuid), tenant_guid, object_id=pk
+            )
     elif row.owner_user_id is None and visibility != "public":
         # Backfilled / pre-existing rows can have no owner (e.g. example
         # data created with no created_by_fk). An ownerless object can
@@ -2078,7 +2124,9 @@ def _set_asset_visibility(asset_type: str, pk: int):
             # tenant keeps it (the caller was refused above unless theirs
             # is the same).
             if tenant_guid and not obj_tenant:
-                outbox.set_object_tenant(asset_type, row.object_uuid, tenant_guid)
+                outbox.set_object_tenant(
+                    asset_type, row.object_uuid, tenant_guid, object_id=pk
+                )
     else:
         service.set_visibility(asset_type, pk, visibility)
 
@@ -3034,7 +3082,9 @@ def _set_asset_owner(asset_type: str, pk: int):
                 _identity_lookup_failed(exc)
                 new_tenant = None
             if new_tenant:
-                outbox.set_object_tenant(asset_type, object_uuid, new_tenant)
+                outbox.set_object_tenant(
+                    asset_type, object_uuid, new_tenant, object_id=pk
+                )
 
     # ISSUE_80: a stock create records the creator in the object's own
     # `editors`, and Superset's own `is_editor` consults that collection
@@ -3201,7 +3251,7 @@ def _claim_asset(asset_type: str, pk: int):
         # Stamped only when the object had no tenant: this is the rescue
         # path that moves an untenanted stray INTO the claimant's tenant.
         if tenant and not obj_tenant:
-            outbox.set_object_tenant(asset_type, object_uuid, tenant)
+            outbox.set_object_tenant(asset_type, object_uuid, tenant, object_id=pk)
 
     # ISSUE_80: same invariant as a transfer -- the previous owner, if any,
     # must not remain a native editor once someone else claims the object.
@@ -3262,7 +3312,16 @@ def purge_tenant_route(tenant_guid: str):
 
     Called from Ivanti's offboarding job. Idempotent: calling it twice, or
     calling it for a tenant that never existed, reports zero rather than
-    failing. Pass ?dry_run=1 to see the counts without deleting.
+    failing.
+
+    DRY RUN IS THE DEFAULT (issue #119). This route deletes a whole
+    tenant's ownership rows, sentinels and store tuples, and it used to do
+    that whenever `?dry_run=1` was absent -- so a caller who omitted the
+    parameter, or misspelled it (`?dryrun=1`, `?dry_run=on`), destroyed
+    instead of previewing. It now previews unless the caller says
+    `?confirm=yes` (or `?dry_run=0`/`false`/`no`), matching the CLI, which
+    previews by default and needs `--yes`. An unrecognised value for
+    either parameter is refused rather than guessed at.
 
     The tenant must be a GUID v4 (400 otherwise) and is lower-cased before
     anything else looks at it: OpenFGA object ids are case-sensitive, so
@@ -3291,9 +3350,65 @@ def purge_tenant_route(tenant_guid: str):
     if not security_manager.is_admin() and caller_tenant != tenant_guid:
         return _err(403, "you may only purge your own tenant")
 
-    dry = request.args.get("dry_run") in ("1", "true", "yes")
+    dry, refused = _purge_is_dry_run()
+    if refused is not None:
+        return refused
     counts = lifecycle.purge_tenant(tenant_guid, dry_run=dry, actor=user)
-    return jsonify({"tenant": tenant_guid, "dry_run": dry, **counts})
+    body = {"tenant": tenant_guid, "dry_run": dry, **counts}
+    if dry:
+        # Say so in the body as well as the flag: a caller that ignores
+        # `dry_run` and reads only the counts would otherwise believe the
+        # tenant had been purged.
+        body["message"] = (
+            "dry run: nothing was deleted. Repeat with ?confirm=yes to purge."
+        )
+    return jsonify(body)
+
+
+_TRUE = ("1", "true", "yes", "y", "on")
+_FALSE = ("0", "false", "no", "n", "off")
+
+
+def _purge_is_dry_run():
+    """(dry_run, refusal). The destructive branch needs an explicit, known
+    affirmative; anything unrecognised -- or anything self-contradictory --
+    is refused rather than interpreted (issue #119).
+
+    Two parameters can each say "destroy" or "preview", so they can also
+    disagree, and the first version of this asked only "is there ANY
+    destructive signal": `?confirm=no&dry_run=0` purged over an explicit
+    refusal, and `?confirm=yes&dry_run=1` purged although `dry_run=1` is
+    documented as a preview (review round 1). A disagreement is now the same
+    400 an unreadable value gets, for the same reason -- the route does not
+    get to pick which half of the request the caller meant.
+    """
+    confirm = request.args.get("confirm")
+    dry_run = request.args.get("dry_run")
+    asked = {}
+    for name, raw in (("confirm", confirm), ("dry_run", dry_run)):
+        if raw is None:
+            continue
+        value = raw.strip().lower()
+        if value not in _TRUE + _FALSE:
+            return True, _err(
+                400,
+                f"{name}={raw!r} is not a yes/no value; "
+                f"use {name}=yes or {name}=no (nothing was deleted)",
+            )
+        # Normalised to one question -- "is this a dry run?" -- so the two
+        # spellings of the same answer can be compared at all: `confirm=yes`
+        # and `dry_run=no` both mean "destroy".
+        asked[name] = value in _FALSE if name == "confirm" else value in _TRUE
+
+    if len(asked) == 2 and asked["confirm"] != asked["dry_run"]:
+        return True, _err(
+            400,
+            f"confirm={confirm!r} and dry_run={dry_run!r} ask for opposite "
+            "things; send one of them (nothing was deleted)",
+        )
+    if asked:
+        return next(iter(asked.values())), None
+    return True, None
 
 
 @ownership_bp.route("/subjects", methods=["GET"])
@@ -3323,9 +3438,17 @@ def search_subjects():
         why = _identity_lookup_failed(exc)
         return _err(400, f"cannot verify your tenant: the identity plug-in {why}")
     if not tenant:
-        # No tenant on the caller (a local admin, say). Nothing to enumerate
-        # from the authorization store; return empty rather than falling back
-        # to every Superset account, which would leak across tenants.
+        # No tenant of their own (a Superset admin, typically). Fall back to
+        # the tenant of the object being shared, when the caller named one
+        # and may manage it -- otherwise the one caller with universal
+        # authority got an empty picker and no way to share, transfer or
+        # take ownership through the UI at all (issue #125). Without an
+        # object there is still nothing to enumerate: answering with every
+        # Superset account would leak across tenants.
+        tenant, refusal = _subjects_tenant_from_object(user)
+        if refusal is not None:
+            return refusal
+    if not tenant:
         return jsonify({"result": [], "tenant": None, "source": "openfga"})
 
     source = _directory_source()
@@ -3340,6 +3463,45 @@ def search_subjects():
     if user_degraded or group_degraded:
         payload["degraded"] = True
     return jsonify(payload)
+
+
+def _subjects_tenant_from_object(user) -> tuple[Optional[str], Any]:
+    """`(tenant, refusal)` for `/subjects?object=<asset_type>:<id>`.
+
+    The drawer always knows the object it is sharing, so a caller with no
+    tenant of their own can name it and get that object's tenant's members
+    -- but only if they may manage that object, which is the same seam every
+    write goes through. So this enumerates nothing a caller could not
+    already act on, and a caller with no ground gets the empty answer they
+    got before rather than a different one that would tell them the object
+    exists.
+
+    A malformed or unknown `object` is not an error: the picker asks the
+    same question for every caller, and the tenanted ones never reach here.
+    """
+    raw = (request.args.get("object") or "").strip()
+    if not raw:
+        return None, None
+    asset_type, _, pk = raw.partition(":")
+    if asset_type not in _ASSET_LOADERS or not pk.isdigit():
+        return None, _err(
+            400, "object must be '<chart|dashboard>:<id>', e.g. 'chart:12'"
+        )
+
+    row = service.lookup(asset_type, int(pk))
+    if row is None or _is_parked(row):
+        return None, None
+    # The ADMIN ground, not any manage ground (review round 1). `owner` is a
+    # manage ground that needs no tenant of the caller's own, so gating on
+    # "may manage" handed a tenantless OWNER of one object in tenant A that
+    # tenant's whole directory -- every member's name, email and GUID, and
+    # every group with its membership -- where before they got `[]`. Acting
+    # on one object is not the authority to read a tenant's directory. This
+    # fallback exists for the caller who already reads everything (#125), so
+    # it is exactly that caller who gets it.
+    if _default_manage_reason(row, user) != MANAGE_REASON_ADMIN:
+        return None, None
+    return service.normalize_tenant(getattr(row, "tenant_guid", None)), None
 
 
 def _subjects_user_rows(tenant: str, q: str) -> tuple[list[dict], bool]:

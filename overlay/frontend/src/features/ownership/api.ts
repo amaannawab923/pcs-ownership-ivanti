@@ -201,11 +201,19 @@ export async function assignOwner(
 
 // The tenant comes back with the rows so the picker can tell "nobody matched"
 // from "this caller has no tenant, so there is nobody to list".
+//
+// `object` names what is being shared, as '<assetType>:<id>'. It matters only
+// for a caller with no tenant of their own -- a Superset admin -- for whom the
+// route falls back to that object's tenant instead of answering with nothing
+// (issue #125). Everyone else is scoped by their own tenant and the parameter
+// is ignored.
 export async function searchSubjects(
   query: string,
+  object?: string,
 ): Promise<OwnershipSubjectSearch> {
+  const scope = object ? `&object=${encodeURIComponent(object)}` : '';
   const { json } = await SupersetClient.get({
-    endpoint: `/api/v1/ownership/subjects?q=${encodeURIComponent(query)}`,
+    endpoint: `/api/v1/ownership/subjects?q=${encodeURIComponent(query)}${scope}`,
   });
   return {
     result: json?.result ?? [],

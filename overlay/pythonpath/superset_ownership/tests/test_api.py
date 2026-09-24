@@ -2365,7 +2365,12 @@ def test_assigning_an_owner_to_an_untenanted_object_gives_it_the_recipients_tena
     admitted_writer.recipient.roles = [Role(f"tenant_{TENANT_A}")]
 
     assert call(OWN[0], OWN[1], OWN[2], {"subject": "user:bob"}) == 200
-    outbox.set_object_tenant.assert_called_once_with("chart", "obj-uuid", TENANT_A)
+    # `object_id=` is what keeps the stamp off a BYSTANDER row: object_uuid
+    # carries no unique constraint, so matching the mirror write by uuid
+    # alone stamped every row holding it (review round 3).
+    outbox.set_object_tenant.assert_called_once_with(
+        "chart", "obj-uuid", TENANT_A, object_id=7
+    )
 
 
 def test_a_claim_never_moves_the_object_out_of_its_tenant(
@@ -2393,7 +2398,12 @@ def test_a_claim_never_moves_the_object_out_of_its_tenant(
     outbox.set_object_tenant.assert_not_called()
     authz.object_tenant.return_value = None
     assert call(CLAIM[0], CLAIM[1], CLAIM[2]) == 200
-    outbox.set_object_tenant.assert_called_once_with("chart", "obj-uuid", TENANT_A)
+    # `object_id=` is what keeps the stamp off a BYSTANDER row: object_uuid
+    # carries no unique constraint, so matching the mirror write by uuid
+    # alone stamped every row holding it (review round 3).
+    outbox.set_object_tenant.assert_called_once_with(
+        "chart", "obj-uuid", TENANT_A, object_id=7
+    )
 
 
 @pytest.mark.parametrize("reason", [MANAGE_PERMISSION, OWNER, TENANT_ADMIN, ADMIN])
@@ -2569,7 +2579,12 @@ def test_adopting_an_untenanted_object_gives_it_the_adopters_tenant(
     authz.object_tenant.return_value = None
 
     assert adopt(holder(TENANT_A, with_role=False), monkeypatch)[0] == 200
-    outbox.set_object_tenant.assert_called_once_with("chart", "obj-uuid", TENANT_A)
+    # `object_id=` is what keeps the stamp off a BYSTANDER row: object_uuid
+    # carries no unique constraint, so matching the mirror write by uuid
+    # alone stamped every row holding it (review round 3).
+    outbox.set_object_tenant.assert_called_once_with(
+        "chart", "obj-uuid", TENANT_A, object_id=7
+    )
 
     outbox.set_object_tenant.reset_mock()
     assert adopt(User(CALLER_ID), monkeypatch)[0] == 200
@@ -3293,12 +3308,17 @@ def test_detail_hides_a_private_object_from_a_stranger(detail_seams, monkeypatch
 # --- GET /subjects ----------------------------------------------------------
 
 
-def search(monkeypatch, caller, query=""):
+def search(monkeypatch, caller, query="", object=None):
     monkeypatch.setattr(api, "_authn", lambda mutating=False: caller)
     path = "/api/v1/ownership/subjects"
-    with flask.Flask(__name__).test_request_context(path, query_string={"q": query}):
+    args = {"q": query}
+    if object is not None:
+        args["object"] = object
+    with flask.Flask(__name__).test_request_context(path, query_string=args):
         response = api.search_subjects()
-    return response.get_json()
+    # `_err` answers (body, status); everything else a single response.
+    body = response[0] if isinstance(response, tuple) else response
+    return body.get_json()
 
 
 def in_tenant(user_id, tenant=TENANT_A, **fields):
@@ -3516,6 +3536,91 @@ def test_subjects_are_empty_for_a_caller_with_no_tenant(directory, monkeypatch):
     directory.list_groups.assert_not_called()
 
 
+class _OwnedRow:
+    """The one thing `_subjects_tenant_from_object` reads off a row."""
+
+    visibility = "private"
+
+    def __init__(self, tenant):
+        self.tenant_guid = tenant
+
+
+def _object_scoped(monkeypatch, *, tenant, reason):
+    """The object exists, in `tenant`, and the caller's DEFAULT manage ground
+    on it is `reason` (the hook-narrowed one is not what the gate reads)."""
+    monkeypatch.setattr(api.service, "lookup", lambda *a, **k: _OwnedRow(tenant))
+    monkeypatch.setattr(api, "_default_manage_reason", lambda row, user: reason)
+
+
+def test_subjects_falls_back_to_the_objects_tenant_for_a_superset_admin(
+    directory, monkeypatch
+):
+    """Issue #125: a Superset admin has no tenant of their own, so the picker
+    was empty for the one caller with authority over every object. Naming the
+    object being shared scopes the search to ITS tenant."""
+    _object_scoped(monkeypatch, tenant=TENANT_A, reason=api.MANAGE_REASON_ADMIN)
+
+    body = search(monkeypatch, User(1, username="admin"), object="chart:7")
+
+    assert body["tenant"] == TENANT_A
+    assert {r["extra"]["guid"] for r in body["result"]} == {
+        "local-1",
+        BOB_GUID,
+        "local-3",
+        "ghost-guid",
+    }
+    assert directory.search_users.call_args[0][0] == TENANT_A
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        None,
+        "owner",
+        "tenant_admin",
+        "manage_permission",
+    ],
+)
+def test_subjects_named_object_enumerates_nothing_short_of_the_admin_ground(
+    directory, monkeypatch, reason
+):
+    """Review round 1. The first version gated on "may manage this object",
+    and `owner` is a manage ground that needs no tenant of the caller's own
+    -- so a tenantless user who still owned ONE object in tenant A was handed
+    that tenant's whole directory (every member's name, email and GUID, and
+    every group with its membership) where before they got `[]`. Acting on
+    one object is not the authority to read a tenant's directory."""
+    _object_scoped(monkeypatch, tenant=TENANT_A, reason=reason)
+
+    body = search(monkeypatch, User(1, username="nobody"), object="chart:7")
+
+    assert body == {"result": [], "tenant": None, "source": "openfga"}
+    directory.search_users.assert_not_called()
+    directory.list_groups.assert_not_called()
+
+
+def test_subjects_named_object_is_ignored_for_a_caller_who_has_a_tenant(
+    directory, monkeypatch
+):
+    """A tenanted caller is scoped by their OWN tenant, whatever object they
+    name -- naming another tenant's object must not widen the search."""
+    lookups = []
+    monkeypatch.setattr(
+        api.service, "lookup", lambda *a, **k: lookups.append(a) or _OwnedRow(TENANT_B)
+    )
+
+    body = search(monkeypatch, in_tenant(1), object=f"chart:7")
+
+    assert body["tenant"] == TENANT_A
+    assert lookups == [], "the object is not even read"
+
+
+def test_subjects_a_malformed_object_is_a_400(directory, monkeypatch):
+    body = search(monkeypatch, User(1, username="admin"), object="chart-7")
+
+    assert "object must be" in body["message"]
+
+
 def test_subjects_default_limit_returns_users_past_a_hundred_members(
     superset_stub, monkeypatch
 ):
@@ -3679,6 +3784,40 @@ def test_subjects_a_malformed_group_page_degrades_rather_than_crashes(
 
     assert body["degraded"] is True
     assert [r for r in body["result"] if r["extra"]["type"] == "group"] == []
+
+
+@pytest.mark.parametrize(
+    "ref", [BOB_GUID, f"{TENANT_A}.{BOB_GUID}", "7", "bob@example.com"]
+)
+def test_the_subject_shapes_a_tenantless_caller_may_name(monkeypatch, ref):
+    """Issue #125: with no tenant of their own -- a Superset admin -- there is
+    no membership to check, so all this branch can do is a shape check. The
+    shape it used to refuse was `user:<tenant>.<member>`: the CANONICAL one,
+    the only one this module's own picker emits and the one the store holds.
+    """
+    caller = User(1, username="admin")
+    monkeypatch.setattr(
+        identity, "normalize_subject", lambda subject: f"user:{BOB_GUID}"
+    )
+
+    ok, why = api._validate_subject(f"user:{ref}", caller)
+
+    assert (ok, why) == (True, ""), why
+
+
+@pytest.mark.parametrize("ref", ["bob", f"{TENANT_A}.", "not-a-guid.also-not"])
+def test_the_subject_shapes_a_tenantless_caller_may_not(monkeypatch, ref):
+    """The sanity check still refuses a reference this deployment could not
+    have produced -- and the message now names both shapes."""
+    caller = User(1, username="admin")
+    monkeypatch.setattr(
+        identity, "normalize_subject", lambda subject: f"user:{BOB_GUID}"
+    )
+
+    ok, why = api._validate_subject(f"user:{ref}", caller)
+
+    assert ok is False
+    assert "tenant-qualified" in why
 
 
 def test_validate_subject_a_non_store_error_from_user_in_tenant_never_echoes_its_text(

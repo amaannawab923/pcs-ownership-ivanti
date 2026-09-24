@@ -132,16 +132,23 @@ HOOK_SPECS: tuple[HookSpec, ...] = (
     # with narrow_manage_reason). M-4: a raise here is NOT "no narrowing" in
     # the sense of "the default still stands" -- `call()`'s fail-closed
     # unknown is `None`, and `narrow_manage_reason(None, default_reason)`
-    # returns `None` unconditionally (its first branch: `hook_result is
-    # None` short-circuits before comparing to `default_reason`), so a
-    # raising OWNERSHIP_CAN_MANAGE denies EVERY caller for that object --
-    # the owner and a Superset admin included -- not merely "no additional
-    # grant beyond the default". This is the intended, safe direction (a
-    # bug in one hook must not silently keep granting what the default
-    # alone would; §4.5.1 item 4's "unknown always denies" reading of §5's
-    # non-overridable invariant), documented in §4.5.2 and UPDATING.md.
+    # returns `None` (its first branch short-circuits before comparing to
+    # `default_reason`), so a raising OWNERSHIP_CAN_MANAGE denies every
+    # OWNER, tenant administrator and permission holder on that object, not
+    # merely "no additional grant beyond the default". That is the intended,
+    # safe direction (a bug in one hook must not silently keep granting what
+    # the default alone would; §4.5.1 item 4's "unknown always denies"
+    # reading of §5's non-overridable invariant), documented in §4.5.2 and
+    # UPDATING.md. The ONE exception, added for issue #126, is the Superset
+    # admin: see `narrow_manage_reason` for why the instance's own operator
+    # is not something a customer hook may take away.
     HookSpec("OWNERSHIP_CAN_MANAGE", 2, "decision", _none, cache="none"),
 )
+
+# `api.MANAGE_REASON_ADMIN`, spelled here rather than imported: api imports
+# this module, not the other way round. `test_plugin_hooks` pins the two
+# spellings together.
+MANAGE_REASON_ADMIN = "admin"
 
 _SPEC_BY_SETTING: dict[str, HookSpec] = {s.setting: s for s in HOOK_SPECS}
 
@@ -369,6 +376,36 @@ def cache_set(
         local[(setting, key)] = value
 
 
+def cache_forget(setting: str, key: Any) -> bool:
+    """Drop one cached answer, in this request and in the shared layer.
+
+    The shared layer has no invalidation of its own: an entry lives out its
+    TTL. That is right for an answer the platform cannot change behind us,
+    and wrong for one it can -- `administered_tenant`'s "yes", which the
+    platform revokes without telling this module, and which then keeps
+    admitting a former tenant administrator for the rest of the window
+    (issue #130). This is what a deployment calls when it knows better:
+    `superset ownership forget-administrator <user-id>` is the operator's
+    spelling of it, and a config hook can call it directly.
+
+    Returns whether the key was reached (False when there is no shared
+    layer, or the backend refused).
+    """
+    local = _request_local()
+    if local is not None:
+        for cached_key in [k for k in local if k[0] == setting and k[1] == key]:
+            local.pop(cached_key, None)
+    backend = _shared_backend()
+    if backend is None:
+        return False
+    try:
+        backend.delete(_cache_key(setting, key))
+    except Exception:  # noqa: BLE001 - a broken backend is not an error here
+        logger.debug("ownership: could not drop %s:%s", setting, key, exc_info=True)
+        return False
+    return True
+
+
 def _cache_get(setting: str, scope: CacheScope, key: Any) -> Any:
     local = _request_local()
     local_key = (setting, key)
@@ -568,7 +605,25 @@ def narrow_manage_reason(
     WARNING on EVERY call -- one line per row per request on the list page.
     Logged at WARNING once per (hook_result, default_reason) pair per
     process, DEBUG afterward -- the pair is still fully diagnosable, just
-    not at WARNING volume forever."""
+    not at WARNING volume forever.
+
+    The Superset admin's ground is the one the hook cannot take away (issue
+    #126). A hook that raises answers `None` for every object, and that used
+    to deny the admin too -- so one broken line in a customer's config
+    locked the whole instance out of every ownership action with no way back
+    except editing that config and restarting. The admin is who installs and
+    removes the hook; leaving them a path in is what makes a broken hook
+    recoverable instead of fatal. Every other ground still fails closed, so
+    a broken hook stops granting what only the default granted."""
+    if default_reason == MANAGE_REASON_ADMIN and hook_result != default_reason:
+        log = logger.warning if hook_result is not None else logger.error
+        log(
+            "ownership: OWNERSHIP_CAN_MANAGE answered %r for a Superset admin; "
+            "the admin ground is not narrowable (issue #126) and stands. Fix or "
+            "remove the hook -- every other caller is being denied.",
+            hook_result,
+        )
+        return default_reason
     if hook_result is None or hook_result == default_reason:
         return hook_result
     key = (hook_result, default_reason)

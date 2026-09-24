@@ -336,6 +336,14 @@ def configure(ns: MutableMapping[str, Any]) -> None:
     # request-local one stays). See parse_lookup_cache_ttl's docstring for
     # the multi-worker safety fallback (SimpleCache under >1 worker turns
     # the shared layer off automatically, with a warning).
+    #
+    # THIS IS ALSO THE MAXIMUM REVOCATION LAG for a tenant administrator
+    # (issue #130): a "yes, administers <tenant>" is shared for the same
+    # window and nothing invalidates it when the platform revokes the
+    # relation, so a demoted administrator keeps reading that tenant's
+    # objects for up to this long. A GRANT is immediate -- a negative
+    # answer is never shared. `superset ownership forget-administrator
+    # <user-id>` drops one cached yes without waiting.
     from superset_ownership.service import parse_lookup_cache_ttl
 
     ns["OWNERSHIP_LOOKUP_CACHE_TTL"] = parse_lookup_cache_ttl(

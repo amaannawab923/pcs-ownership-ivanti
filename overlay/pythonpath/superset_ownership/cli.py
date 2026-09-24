@@ -31,6 +31,7 @@ path someone has to get right under pressure.
     superset ownership enable   [--dry-run]       re-arm denial from the rows
     superset ownership disable  [--remove-rows]   strip denial (before flag-off)
     superset ownership reconcile [--write]        realign the store's owner tuples
+    superset ownership forget-administrator <id>  drop a revoked admin's cached yes
     superset ownership backfill-tenants           give old objects a tenant
     superset ownership purge-tenant <guid> [--yes] [--force-open]
                                                   offboarding; --force-open also
@@ -184,7 +185,9 @@ def check() -> None:
 
 
 @ownership.command()
-@click.option("--dry-run", is_flag=True, help="Report what would be armed, write nothing.")
+@click.option(
+    "--dry-run", is_flag=True, help="Report what would be armed, write nothing."
+)
 @with_appcontext
 def enable(dry_run: bool) -> None:
     """Re-arm denial for every non-public object. Run AFTER setting the flag true."""
@@ -194,7 +197,9 @@ def enable(dry_run: bool) -> None:
 
 
 @ownership.command()
-@click.option("--remove-rows", is_flag=True, help="Also delete the ownership and share rows.")
+@click.option(
+    "--remove-rows", is_flag=True, help="Also delete the ownership and share rows."
+)
 @click.confirmation_option(prompt="Strip denial from every object in this instance?")
 @with_appcontext
 def disable(remove_rows: bool) -> None:
@@ -204,11 +209,42 @@ def disable(remove_rows: bool) -> None:
     _emit(do_disable(remove_rows=remove_rows))
 
 
+@ownership.command("forget-administrator")
+@click.argument("user_id", type=int)
+@with_appcontext
+def forget_administrator(user_id: int) -> None:
+    """Stop serving the cached "administers a tenant" answer for USER_ID.
+
+    The tenant-administrator answer is cached in the shared layer for
+    OWNERSHIP_LOOKUP_CACHE_TTL seconds and nothing invalidates it, so a
+    demoted administrator keeps reading their former tenant's objects until
+    it ages out (issue #130). Run this when the platform revokes the
+    relation and the wait is not acceptable. A GRANT needs no command: a
+    negative answer is never shared, so it is seen on the next request.
+
+    The shared cache is per deployment, so one run covers every worker.
+    """
+    from superset_ownership import service
+
+    _emit(
+        {
+            "forgot": "administered_tenant",
+            "user_id": user_id,
+            "shared_layer": service.forget_administered_tenant(user_id),
+        }
+    )
+
+
 @ownership.command()
 @click.option("--write", is_flag=True, help="Apply the changes (default reports only).")
 @with_appcontext
 def reconcile(write: bool) -> None:
-    """Realign the authorization store's owner tuples with the ownership rows."""
+    """Realign the authorization store's owner tuples with the ownership rows.
+
+    Also clears ownership rows whose object no longer exists, and the tuples
+    with them -- the orphans a hard delete left behind before the module
+    collected that path (issue #120).
+    """
     from superset_ownership.lifecycle import reconcile as do_reconcile
 
     _emit(do_reconcile(dry_run=not write))
@@ -225,7 +261,9 @@ def backfill_tenants() -> None:
 
 @ownership.command("purge-tenant")
 @click.argument("tenant_guid", callback=_tenant_guid_argument)
-@click.option("--yes", is_flag=True, help="Actually delete. Without it, this is a dry run.")
+@click.option(
+    "--yes", is_flag=True, help="Actually delete. Without it, this is a dry run."
+)
 @click.option(
     "--force-open",
     is_flag=True,
@@ -281,14 +319,55 @@ def db_upgrade(revision: str) -> None:
 
 @db_group.command("downgrade")
 @click.argument("revision")
-@click.confirmation_option(prompt="Downgrade the ownership schema?")
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the prompt and proceed even though the downgrade discards data.",
+)
 @with_appcontext
-def db_downgrade(revision: str) -> None:
-    """Revert the ownership chain to REVISION ('base' drops the tables)."""
-    from superset_ownership import migrate
+def db_downgrade(revision: str, yes: bool) -> None:
+    """Revert the ownership chain to REVISION ('base' drops the tables).
+
+    Alembic downgrades TO a revision, so this runs every step between the
+    current one and REVISION -- and some of those discard data. The
+    pre-flight lists them and refuses without --yes (issue #121): from head,
+    `downgrade 0002_ownership_outbox` would drop `tenant_guid` on the way
+    past 0004 long before it reached 0002's own undelivered-rows guard.
+    """
+    from superset_ownership import migrate, outbox
+
+    try:
+        steps = migrate.destructive_steps(revision)
+    except migrate.UnreadableRevision as exc:
+        # Refuse rather than proceed on an empty pre-flight: not being able
+        # to say what a downgrade would run is not the same as it running
+        # nothing (review round 1).
+        raise click.ClickException(str(exc)) from exc
+    if steps and not yes:
+        lines = "\n".join(f"  {rev}: {what}" for rev, what in steps)
+        undelivered = ""
+        try:
+            st = outbox.status()
+            pending = st["pending"] + st["claimed"] + st["dead"]
+            if pending:
+                undelivered = (
+                    f"\n  the outbox still holds {pending} undelivered row(s); "
+                    "drain or discard them first"
+                )
+        except Exception:  # noqa: BLE001,S110 - advisory only; never mask the refusal
+            pass  # the outbox count is a courtesy, the refusal stands either way
+        raise click.ClickException(
+            f"downgrading to {revision} would run {len(steps)} data-destroying "
+            f"step(s) before it gets there:\n{lines}{undelivered}\n"
+            "Re-run with --yes if that is what you mean."
+        )
+    if not yes:
+        click.confirm("Downgrade the ownership schema?", abort=True)
 
     migrate.downgrade(revision)
-    _emit({"chain": "ownership", "downgraded_to": revision, "current": migrate.current()})
+    _emit(
+        {"chain": "ownership", "downgraded_to": revision, "current": migrate.current()}
+    )
 
 
 @db_group.command("current")
@@ -297,7 +376,9 @@ def db_current() -> None:
     """Which ownership revision this database is at."""
     from superset_ownership import migrate
 
-    _emit({"chain": "ownership", "current": migrate.current(), "heads": migrate.heads()})
+    _emit(
+        {"chain": "ownership", "current": migrate.current(), "heads": migrate.heads()}
+    )
 
 
 @db_group.command("stamp")
@@ -321,7 +402,9 @@ def outbox_group() -> None:
 
 
 @outbox_group.command("status")
-@click.option("--verbose", "-v", is_flag=True, help="Also list every dead row with its error.")
+@click.option(
+    "--verbose", "-v", is_flag=True, help="Also list every dead row with its error."
+)
 @with_appcontext
 def outbox_status(verbose: bool) -> None:
     """Counts by status, rows stuck behind dead objects, and the oldest problem.
@@ -361,9 +444,61 @@ def outbox_replay(row_ids: tuple[int, ...]) -> None:
     _emit({"replayed": outbox.replay_dead(list(row_ids) or None)})
 
 
+@outbox_group.command("discard")
+@click.argument("row_ids", nargs=-1, type=int)
+@click.option("--yes", is_flag=True, help="Required: this deletes the intents.")
+@click.option(
+    "--including-revocations",
+    is_flag=True,
+    help="Also discard dead revoking rows -- this RESTORES access; see the help.",
+)
+@with_appcontext
+def outbox_discard(
+    row_ids: tuple[int, ...], yes: bool, including_revocations: bool
+) -> None:
+    """Delete dead rows (all of them, or the given ROW_IDS) so the queue moves.
+
+    For a row the store will never accept: `replay` would only kill it
+    again, and while it sits there every later sharing change for the SAME
+    object waits behind it. Discarding drops the undelivered intent, not
+    the share itself -- run `ownership check` afterwards and re-issue
+    whatever is still missing.
+
+    GRANTING rows only, by default. A dead `revoke_subject`, `delete` or
+    `purge_object` row is the only thing still denying that subject -- the
+    read gate counts it, while the store's tuple was never removed -- so
+    discarding it GRANTS access rather than leaving it as it was, and
+    nothing takes the tuple back afterwards. Those are kept and counted;
+    fix the store and `replay` them. `--including-revocations` discards
+    them anyway, for an operator who will remove the tuples by hand.
+    """
+    from superset_ownership import outbox
+
+    if not yes:
+        raise click.ClickException(
+            "refusing to discard undelivered intents without --yes; "
+            "`ownership outbox status -v` lists what would go"
+        )
+    discarded = outbox.discard_dead(
+        list(row_ids) or None, including_revocations=including_revocations
+    )
+    result = {"discarded": discarded, "including_revocations": including_revocations}
+    if including_revocations and discarded:
+        result["warning"] = (
+            "a discarded revoking row was the only thing denying that subject; "
+            "remove their tuples in the store, then run `ownership check`"
+        )
+    _emit(result)
+
+
 @outbox_group.command("prune")
-@click.option("--older-than-days", default=30, show_default=True, type=int,
-              help="Delete `done` rows settled more than this many days ago.")
+@click.option(
+    "--older-than-days",
+    default=30,
+    show_default=True,
+    type=int,
+    help="Delete `done` rows settled more than this many days ago.",
+)
 @with_appcontext
 def outbox_prune(older_than_days: int) -> None:
     """Housekeeping: delete delivered rows. Pending, claimed and dead rows are

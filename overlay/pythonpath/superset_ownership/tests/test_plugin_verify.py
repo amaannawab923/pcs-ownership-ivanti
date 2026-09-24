@@ -2032,7 +2032,11 @@ def test_discover_candidate_tenants_and_jit_users_under_the_neurons_role(harness
         assert not any(t.lower().startswith("tenant_") for t in tenants)
         sampled = pv._discover_jit_users(tenant_guid, 10)
         assert user.id in {u.id for u in sampled}
-        sampled_any = pv._discover_jit_users(None, 100)
+        # The sample is capped, and this session's world grows as tests are
+        # added, so ask for more than it can hold: what is under test is that
+        # the tenant-less scan reaches this member at all, not where in the
+        # first hundred accounts they happen to land.
+        sampled_any = pv._discover_jit_users(None, 10000)
         assert user.id in {u.id for u in sampled_any}
         assert pv._discover_jit_users("00000000-0000-4000-8000-000000000000", 10) == []
 

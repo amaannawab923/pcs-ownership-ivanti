@@ -116,7 +116,9 @@ def govern(
         if subject:
             outbox.write_tuple(subject, "owner", f"{asset_type}:{object_uuid}")
         if tenant_guid:
-            outbox.set_object_tenant(asset_type, object_uuid, tenant_guid)
+            outbox.set_object_tenant(
+                asset_type, object_uuid, tenant_guid, object_id=model.id
+            )
 
     if emit:
         from superset import security_manager
@@ -855,7 +857,11 @@ def editor_subject_ids(
 
 
 def after_asset_delete(
-    asset_type: str, object_id: int, object_uuid: Optional[str]
+    asset_type: str,
+    object_id: int,
+    object_uuid: Optional[str],
+    *,
+    lock: bool = True,
 ) -> None:
     """Collect an object's ownership state when the object itself goes.
 
@@ -870,16 +876,55 @@ def after_asset_delete(
     db = service._db()
     # The per-object write lock, as on every mutating route, so the purge
     # row this enqueues cannot take an id out of commit order with a share
-    # or transfer racing on the same object. This runs in `before_flush`,
-    # ahead of Superset's own statements in the flush, so the ownership row
-    # is locked before Superset's row -- the same order the routes use
-    # (lock, then touch the asset). The DELETE of the row below takes the
-    # same row lock in any case, so the explicit lock adds no wait, and no
-    # deadlock exposure, that the hook did not already have (on Postgres it
-    # adds the advisory lock every writer takes first, in the same order);
-    # it makes the hook's discipline the routes'. A bulk delete reaches here
-    # once per object, in (asset_type, object_id) order (guard._collect_deleted).
-    service.lock_object(asset_type, object_id)
+    # or transfer racing on the same object. On the ORM path this runs in
+    # `before_flush`, ahead of Superset's own statements in the flush, so
+    # the ownership row is locked before Superset's row -- the same order
+    # the routes use (lock, then touch the asset). The DELETE of the row
+    # below takes the same row lock in any case, so the explicit lock adds
+    # no wait, and no deadlock exposure, that the hook did not already
+    # have; it makes the hook's discipline the routes'. A bulk delete
+    # reaches here once per object, in (asset_type, object_id) order
+    # (guard._collect_deleted).
+    #
+    # `lock=False` is the ONE caller that cannot honour that order:
+    # `guard._collect_core_deleted`, standing in front of a statement whose
+    # caller (`cascade_hard_delete`) already holds the asset row FOR
+    # UPDATE. Taking ours there would be the module's only lock-after-asset
+    # and the ABBA against the visibility route (review round 1); the row
+    # locks the DELETEs below take are enough, because this path's intents
+    # are the last the object will ever have.
+    if lock:
+        service.lock_object(asset_type, object_id)
+    # WHICH uuid the store has this object filed under. Normally the two
+    # agree, and this is `object_uuid`. They disagree when the same flush
+    # both re-points the object's uuid and deletes it: SQLAlchemy drops a
+    # deleted object out of `session.dirty`, so `guard._follow_uuid_changes`
+    # never sees it, while the caller reads the object's already-reassigned
+    # in-memory uuid -- and we would then purge a reference that never held
+    # a tuple and leave the real ones filed under the old one forever, with
+    # the row gone so nothing could ever find them again (review round 3).
+    # The MIRROR is what the store was written from, so purge both.
+    #
+    # ONLY where the store files relationships under the object's uuid
+    # (review round 4). On a backend keyed by object id -- the local one --
+    # the relationships ARE the share rows this function deletes a few lines
+    # below, so the purge is redundant there; worse, by the time it runs the
+    # row is gone, so resolving the reference back to a row lands on
+    # whichever OTHER row still holds that uuid (`object_uuid` carries no
+    # unique constraint) and deletes THAT object's shares. `reconcile`
+    # restores owner tuples but never share tuples, so the victim's share is
+    # permanently dead, and its mirror rows survive so `check` stays green.
+    # Same declaration `service.repoint_object_uuid` reads, same reason.
+    if getattr(get_authorizer(), "addresses_objects_by_uuid", True):
+        mirrored = getattr(
+            service.lookup(asset_type, object_id, fresh=True), "object_uuid", None
+        )
+        doomed_refs = [
+            u for u in (object_uuid, str(mirrored) if mirrored else None) if u
+        ]
+        doomed_refs = list(dict.fromkeys(doomed_refs))  # ordered, de-duplicated
+    else:
+        doomed_refs = []
     # Local rows first: their removal must never depend on the store
     # answering. Then the delete EVENT for the authorization store, in the
     # same transaction, so the object's tuples are removed even if OpenFGA is
@@ -901,9 +946,9 @@ def after_asset_delete(
     # The row is gone; a cached copy would keep answering for an object that
     # no longer exists (and for its id, should the database ever reuse it).
     service.invalidate(asset_type, object_id)
-    if object_uuid:
+    for ref in doomed_refs:
         try:
-            outbox.purge_object(asset_type, object_uuid)
+            outbox.purge_object(asset_type, ref)
         except StoreError as exc:
             # Inline mode only (enabled, purge_object is an enqueue and cannot
             # raise): the store could not be purged right now. The local

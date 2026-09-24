@@ -282,7 +282,23 @@ def _invalidate_list_objects(obj: str, subject: Optional[str]) -> None:
     service.invalidate_list_objects(asset_type, subject)
 
 
-def set_object_tenant(asset_type: str, object_uuid: str, tenant_guid: str) -> bool:
+def set_object_tenant(
+    asset_type: str,
+    object_uuid: str,
+    tenant_guid: str,
+    *,
+    object_id: Optional[int] = None,
+) -> bool:
+    """`object_id`, when the caller knows it, is what the ROW is matched on.
+
+    `ownership_object.object_uuid` carries no unique constraint, and on the
+    instances that most need repairing it is demonstrably not unique -- a
+    `uuid_divergence` is exactly a row holding a uuid some other object may
+    now carry. Matching the mirror write by uuid there stamps a BYSTANDER
+    row's tenant (review round 2). The store half is addressed by uuid
+    because that is how the store addresses objects; the row half does not
+    have to be.
+    """
     if not (object_uuid and tenant_guid):
         return False
     # The row's mirror of the tenant (revision 0004) is written here, in the
@@ -291,7 +307,7 @@ def set_object_tenant(asset_type: str, object_uuid: str, tenant_guid: str) -> bo
     # not wait for a drain to know which tenant an object is in.
     from superset_ownership import service
 
-    service.set_row_tenant(asset_type, object_uuid, tenant_guid)
+    service.set_row_tenant(asset_type, object_uuid, tenant_guid, object_id=object_id)
     if enabled():
         enqueue(OP_SET_TENANT, f"{asset_type}:{object_uuid}", tenant_guid, "tenant")
         return True
@@ -992,6 +1008,84 @@ def replay_dead(row_ids: Optional[list[int]] = None, session: Any = None) -> int
         stmt = stmt.where(ownership_outbox.c.id.in_(row_ids))
     n = session.execute(stmt).rowcount
     session.commit()
+    return n
+
+
+def discard_dead(
+    row_ids: Optional[list[int]] = None,
+    session: Any = None,
+    *,
+    including_revocations: bool = False,
+) -> int:
+    """Delete dead rows so the object's queue can move again.
+
+    The escape hatch issue #118 showed was missing. A row the store will
+    never accept (a subject it refuses outright) stays `dead` forever, and
+    because delivery is ordered per object, every later intent for that
+    object waits behind it: the API keeps answering 200 while nothing
+    reaches the store, and `check` stays red with no supported way back.
+    `replay` cannot help -- the next drain kills the row again -- and
+    `prune` only deletes delivered rows.
+
+    Deliberately destructive and deliberately narrow: it discards the
+    INTENT, not the mirror row. What the store then holds for that object
+    is whatever it held before, so an operator's next step is
+    `reconcile --write` (owner tuples) or re-issuing the share; both are
+    visible in `check`. Takes explicit row ids, or every dead row.
+
+    A REVOKING row is not discarded by this (review round 1). A dead
+    `revoke_subject`, `delete` or `purge_object` row is not merely an
+    undelivered intent: `has_pending_revocation` counts dead rows ON
+    PURPOSE, so while it sits there the read gate denies the subject
+    locally even though the store's tuple was never removed. Discarding it
+    therefore does not leave access as it was -- it GRANTS, silently, and
+    `reconcile` will not take the tuple away again (it never deletes a
+    share tuple the mirror has lost). Those rows need
+    `discard_dead(..., including_revocations=True)`, which the CLI puts
+    behind its own flag and its own warning.
+    """
+    session = session or _session()
+    revoking = (OP_REVOKE_SUBJECT, OP_DELETE, OP_PURGE_OBJECT)
+    base = [ownership_outbox.c.status == STATUS_DEAD]
+    if row_ids:
+        base.append(ownership_outbox.c.id.in_(row_ids))
+
+    held_back = 0
+    if not including_revocations:
+        held_back = len(
+            session.execute(
+                select(ownership_outbox.c.id).where(
+                    *base, ownership_outbox.c.op.in_(revoking)
+                )
+            ).all()
+        )
+
+    stmt = delete(ownership_outbox).where(*base)
+    if not including_revocations:
+        stmt = stmt.where(ownership_outbox.c.op.notin_(revoking))
+    n = session.execute(stmt).rowcount
+    session.commit()
+    if n:
+        logger.warning(
+            "superset_ownership: discarded %d dead outbox row(s) %s; the store was "
+            "NOT changed -- run `ownership check` and re-issue anything still missing",
+            n,
+            row_ids or "(all)",
+        )
+    if held_back:
+        logger.warning(
+            "superset_ownership: kept %d dead REVOKING row(s): discarding one restores "
+            "access the store never took away. Resolve the store, then `outbox replay` "
+            "-- or discard them knowingly with --including-revocations and remove the "
+            "tuples yourself",
+            held_back,
+        )
+    if including_revocations and n:
+        logger.warning(
+            "superset_ownership: revoking rows were among them; subjects denied only by "
+            "those rows can read again NOW. Remove their tuples in the store, then "
+            "`ownership check`",
+        )
     return n
 
 

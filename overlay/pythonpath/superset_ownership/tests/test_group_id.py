@@ -953,10 +953,10 @@ def test_normalize_tenant_guid_lower_cases_a_v4():
 # --- api: POST /tenant/<guid>/purge gets the same check as the CLI -----------
 
 
-def _post_purge(api_module, monkeypatch, tenant, caller=None):
+def _post_purge(api_module, monkeypatch, tenant, caller=None, query=""):
     flask = pytest.importorskip("flask")
     monkeypatch.setattr(api_module, "_authn", lambda mutating=False: caller or object())
-    path = f"/api/v1/ownership/tenant/{tenant}/purge"
+    path = f"/api/v1/ownership/tenant/{tenant}/purge{query}"
     with flask.Flask(__name__).test_request_context(path, method="POST"):
         response = api_module.purge_tenant_route(tenant)
     if isinstance(response, tuple):
@@ -1370,3 +1370,138 @@ def test_startup_check_mentions_untenanted_shares_at_info_and_stays_ok(
         for m in messages
     )
     assert any("startup check ok" in m for m in messages)
+
+
+# --- issue #119: the destructive branch needs an explicit yes ------------------
+
+
+def _purge_spy(monkeypatch):
+    """Records how `purge_tenant` was called, so a test can tell a preview
+    from a deletion."""
+    from superset_ownership import lifecycle
+
+    calls = []
+
+    def spy(tenant, dry_run=False, actor=None, force_open=False):
+        calls.append({"tenant": tenant, "dry_run": dry_run})
+        return {"members": 0}
+
+    monkeypatch.setattr(lifecycle, "purge_tenant", spy)
+    return calls
+
+
+def test_purge_route_previews_when_nothing_is_confirmed(
+    api_module, superset_stub, monkeypatch
+):
+    """The blocker: no parameter at all used to DELETE. A tenant-wide,
+    irreversible operation defaults to the safe branch."""
+    calls = _purge_spy(monkeypatch)
+    superset_stub.security_manager.is_admin.return_value = True
+
+    status, body = _post_purge(api_module, monkeypatch, TENANT_A)
+
+    assert status == 200
+    assert calls == [{"tenant": TENANT_A, "dry_run": True}]
+    assert body["dry_run"] is True
+    assert "nothing was deleted" in body["message"]
+
+
+@pytest.mark.parametrize(
+    "query", ["?confirm=yes", "?confirm=1", "?dry_run=0", "?dry_run=false"]
+)
+def test_purge_route_deletes_only_when_told_to(
+    query, api_module, superset_stub, monkeypatch
+):
+    calls = _purge_spy(monkeypatch)
+    superset_stub.security_manager.is_admin.return_value = True
+
+    status, body = _post_purge(api_module, monkeypatch, TENANT_A, query=query)
+
+    assert status == 200
+    assert calls == [{"tenant": TENANT_A, "dry_run": False}], query
+    assert body["dry_run"] is False
+    assert "message" not in body
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["?confirm=please", "?confirm=", "?dry_run=maybe"],
+)
+def test_purge_route_refuses_a_value_it_cannot_read_rather_than_guessing(
+    query, api_module, superset_stub, monkeypatch
+):
+    """A misspelt parameter used to mean 'not a dry run', i.e. destroy.
+    Anything unrecognised is now a 400 and nothing is called."""
+    calls = _purge_spy(monkeypatch)
+    superset_stub.security_manager.is_admin.return_value = True
+
+    status, body = _post_purge(api_module, monkeypatch, TENANT_A, query=query)
+
+    assert status == 400, (query, body)
+    assert "nothing was deleted" in body["message"], query
+    assert calls == [], query
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "?confirm=no&dry_run=0",
+        "?confirm=yes&dry_run=1",
+        "?confirm=1&dry_run=on",
+        "?confirm=off&dry_run=false",
+    ],
+)
+def test_purge_route_refuses_two_parameters_that_disagree(
+    query, api_module, superset_stub, monkeypatch
+):
+    """Review round 1. The first version asked "is there ANY destructive
+    signal", never "do these agree": `?confirm=no&dry_run=0` purged over an
+    explicit refusal, and `?confirm=yes&dry_run=1` purged although
+    `dry_run=1` is documented as a preview. Both are now the same 400 an
+    unreadable value gets -- the route does not get to pick which half of a
+    self-contradictory request the caller meant."""
+    calls = _purge_spy(monkeypatch)
+    superset_stub.security_manager.is_admin.return_value = True
+
+    status, body = _post_purge(api_module, monkeypatch, TENANT_A, query=query)
+
+    assert status == 400, (query, body)
+    assert "opposite" in body["message"], query
+    assert calls == [], query
+
+
+@pytest.mark.parametrize(
+    "query,dry",
+    [
+        ("?confirm=yes&dry_run=no", False),
+        ("?confirm=no&dry_run=yes", True),
+        ("?confirm=0&dry_run=1", True),
+        ("?confirm=true&dry_run=off", False),
+    ],
+)
+def test_purge_route_accepts_two_parameters_that_agree(
+    query, dry, api_module, superset_stub, monkeypatch
+):
+    """Two spellings of one answer are not a conflict."""
+    calls = _purge_spy(monkeypatch)
+    superset_stub.security_manager.is_admin.return_value = True
+
+    status, body = _post_purge(api_module, monkeypatch, TENANT_A, query=query)
+
+    assert status == 200, (query, body)
+    assert calls == [{"tenant": TENANT_A, "dry_run": dry}], query
+
+
+@pytest.mark.parametrize("query", ["?dryrun=1", "?DRY_RUN=0", "?confirm_purge=yes"])
+def test_purge_route_treats_an_unknown_parameter_name_as_no_confirmation(
+    query, api_module, superset_stub, monkeypatch
+):
+    """`?dryrun=1` (the misspelling a QA tester reached for) is not a
+    confirmation of anything, so it previews rather than destroys."""
+    calls = _purge_spy(monkeypatch)
+    superset_stub.security_manager.is_admin.return_value = True
+
+    status, body = _post_purge(api_module, monkeypatch, TENANT_A, query=query)
+
+    assert status == 200, (query, body)
+    assert calls == [{"tenant": TENANT_A, "dry_run": True}], query
