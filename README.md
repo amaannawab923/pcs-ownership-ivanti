@@ -146,8 +146,12 @@ your store recognises. Out of the box it assumes:
 - the subject is therefore `user:<tenant>.<member>`;
 - a **tenant administrator** holds `admin` on `tenant:<guid>`.
 
-If that already describes your instance, there is nothing to do. If it does
-not, you override the seams rather than patch the module -- each is a
+If that already describes your instance, there is nothing to do. **If the
+tenant part does not, the mismatch is silent** -- no user resolves to a
+tenant, nothing gets stamped, and `check` still answers ok; see [If
+`check` says ok but `untenanted_public` lists
+everything](#if-check-says-ok-but-untenanted_public-lists-everything) for
+how to spot it. Rather than patch the module, you override the seams -- each is a
 dotted path to your own callable, and you can replace one without touching
 the others:
 
@@ -186,10 +190,37 @@ Superset's. The backfill has no CLI command of its own because it is a
 one-time adoption step, not an operation -- it needs an app context, which
 is what that snippet builds; `docker/entrypoint-ownership.sh` runs exactly
 this and is worth copying into your own entrypoint, so a deploy can never
-migrate without adopting. The backfill gives every existing dashboard and chart an owner
-(whoever created it) and makes it public, so an instance that had no
-ownership yesterday behaves exactly as it did -- nothing becomes invisible
-because you installed this.
+migrate without adopting. The backfill gives every existing dashboard and
+chart an owner (whoever created it) and makes it public, so an instance
+that had no ownership yesterday behaves exactly as it did -- nothing
+becomes invisible because you installed this.
+
+The chain keeps its own Alembic bookkeeping in `alembic_version_ownership`
+and never reads or writes Superset's `alembic_version`, so it runs against
+a database carrying years of its own migration history without touching
+it. Two things to know before you run it against one:
+
+**Set `OWNERSHIP_DEFAULT_OWNER` before the backfill.** An existing
+object's owner is resolved `created_by_fk` -> `changed_by_fk` ->
+`OWNERSHIP_DEFAULT_OWNER`. Objects with no recorded creator -- imported
+ones, examples, anything that arrived through a migration rather than
+through the UI -- otherwise end up public with a **null** owner, which
+means "owner unknown": nobody can take them private or share them,
+because every management path needs an owner. Set it to a Superset user
+id and those objects stay manageable:
+
+```python
+OWNERSHIP_DEFAULT_OWNER = 1
+```
+
+**The one constraint that touches your schema.** Revision 0003 adds a
+foreign key from `ownership_object.owner_user_id` to `ab_user.id`, so a
+deleted user leaves objects unowned rather than dangling. `ADD CONSTRAINT`
+validates under `SHARE ROW EXCLUSIVE` on `ab_user`, so on PostgreSQL a
+login's `last_login` write waits for that scan. It is milliseconds on an
+ordinary user table; if yours is very large, migrate in a maintenance
+window, or start the `NOT VALID` / `VALIDATE CONSTRAINT` split by hand as
+`constraints.py` describes.
 
 ### 6. Check it
 
@@ -301,16 +332,46 @@ The module says so itself at boot: *the outbox is ENABLED but no Celery
 beat entry runs superset_ownership.outbox.drain*. That warning is worth
 believing.
 
-### Reading `check` on a single-tenant instance
+### If `check` says ok but `untenanted_public` lists everything
 
-On an instance with no tenant roles at all, `superset ownership check`
-reports every object under `untenanted_public` and still answers
-`"ok": true`. That is expected, not damage: an object's tenant is derived
-from its owner's tenant role, so with no tenant roles there is nothing to
-stamp. It matters only under `OWNERSHIP_PUBLIC_SCOPE = "tenant"`, where a
-public object is public *within its tenant* -- an untenanted one is then
-visible to nobody but its owner. If you are running single-tenant, set
-`OWNERSHIP_PUBLIC_SCOPE = "instance"` and the field stops mattering.
+Read this one carefully: the same output means two opposite things, and
+only one of them is fine.
+
+`untenanted_public` is an object that is public but carries no tenant. An
+object's tenant is derived from its **owner's tenant role**, so a row can
+only be stamped when its owner holds one -- which is why `check` splits
+the two cases. A row whose owner *does* have a tenant is listed as
+`untenanted_public_repairable` and **fails** the check until
+`backfill-tenants` stamps it. A row whose owner has no tenant at all is
+listed under `untenanted_public` only and does **not** fail, because
+nothing could stamp it.
+
+- **Single-tenant, no tenant roles anywhere.** Every object lands in
+  `untenanted_public`, `check` answers `"ok": true`, and that is correct:
+  there is no tenant to record. Set `OWNERSHIP_PUBLIC_SCOPE = "instance"`
+  and the field stops mattering to you.
+
+- **Multi-tenant, and you expected tenants to be there.** The same output
+  now means your users' tenant roles are not being recognised: so
+  `backfill-tenants` stamped nothing, `check` still said ok, and
+  tenant-scoped "public" cannot tell your tenants apart. Nothing breaks
+  loudly; it just is not doing the thing you installed it for.
+
+**How to tell which one you have**, before trusting a green `check`:
+
+```bash
+superset ownership plugin verify --sample-users 40
+```
+
+It finds its sample by looking for users holding a role named
+`Tenant_<guid>_Role` or `tenant_<guid>`. If your roles are named anything
+else it finds nobody, and every identity check comes back
+`SKIP -- no sample JIT users supplied`. **On a multi-tenant instance, an
+identity section that SKIPs is the warning.** The fix is not to rename
+your roles: point the module at wherever your tenant actually lives, with
+`OWNERSHIP_TENANT_GUID` (and `OWNERSHIP_MEMBER_GUID`, if the member id is
+not the username) from step 4. Then re-run `backfill-tenants` and
+`check`.
 
 ## Quick setup
 
