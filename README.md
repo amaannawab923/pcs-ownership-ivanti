@@ -56,7 +56,7 @@ below out of the globals you pass it.
 The frontend is separate. The backend refuses nothing without it, but the
 sharing drawer and the Owner/Sharing columns only exist if you apply
 `overlay/frontend/` to your Superset source before `npm run build`. See
-[For pcs-ivanti](#for-pcs-ivanti-applying-this-to-your-fips-build) for the
+[For pcs-ivanti](#for-pcs-ivanti-applying-this-to-your-fips-chainguard-build) for the
 exact build-stage placement.
 
 ### 2. Configure it
@@ -211,11 +211,106 @@ their tenant and groups come back the shape the module expects.
 
 ### What working looks like
 
-Create a chart, open its Sharing drawer, set it to Private. Another user in
-your tenant gets a 404 on it -- not a permission banner, not an empty
-chart. Share it with them and they see it within about ten seconds (the
-outbox drain interval). Take the store offline and the object stays
-private: denial never depends on the store being reachable.
+With the frontend applied: create a chart, open its Sharing drawer, set it
+to Private. Another user in your tenant gets a 404 on it -- not a
+permission banner, not an empty chart. Share it with them and they see it
+within about ten seconds (the outbox drain interval). Take the store
+offline and the object stays private: denial never depends on the store
+being reachable.
+
+### Proving it without the frontend
+
+The backend stands on its own, and you do not need the sharing drawer to
+test it. The module adds these routes under `/api/v1/ownership`:
+
+| Route | Does |
+|---|---|
+| `GET /charts`, `GET /dashboards` | what this caller may see, with owner and visibility |
+| `GET /chart/<id>`, `GET /dashboard/<id>` | one object's ownership, shares and what you may do to it |
+| `PUT /chart/<id>/visibility` | `{"visibility": "private" \| "shared" \| "public"}` |
+| `POST /chart/<id>/shares` | `{"subject": "...", "role": "viewer" \| "editor"}` |
+| `DELETE /chart/<id>/shares/<subject>` | unshare |
+| `PUT /chart/<id>/owner` | transfer; `{"subject": null}` releases |
+| `POST /chart/<id>/claim` | take ownership |
+| `GET /subjects?q=` | the people and groups you may share with |
+
+Every one of them takes a bearer token, writes included -- a JWT needs no
+CSRF header, which is what makes the whole thing testable from a shell:
+
+```bash
+H=http://localhost:8088
+tok() { curl -s $H/api/v1/security/login -H 'Content-Type: application/json' \
+        -d "{\"username\":\"$1\",\"password\":\"$2\",\"provider\":\"db\",\"refresh\":false}" \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'; }
+OWNER=$(tok the-owner   their-password)
+OTHER=$(tok the-other-user  their-password)
+A="-H Content-Type:application/json"
+```
+
+A worked check, with two users and one chart:
+
+```bash
+# as the owner: make it private
+curl -X PUT $H/api/v1/ownership/chart/99/visibility \
+     -H "Authorization: Bearer $OWNER" $A -d '{"visibility":"private"}'
+
+# as the other user: the ownership detail is a 404, the chart is gone from
+# their list, and the data route refuses
+curl $H/api/v1/ownership/chart/99 -H "Authorization: Bearer $OTHER"
+#  -> {"message":"chart not found"}
+curl -X POST $H/api/v1/chart/99/data/ -H "Authorization: Bearer $OTHER"
+#  -> 403
+
+# as the owner: shared, then shared with Ben
+curl -X PUT  $H/api/v1/ownership/chart/99/visibility \
+     -H "Authorization: Bearer $OWNER" $A -d '{"visibility":"shared"}'
+curl -X POST $H/api/v1/ownership/chart/99/shares \
+     -H "Authorization: Bearer $OWNER" $A -d '{"subject":"user:2"}'
+```
+
+Repeat any of it against `/dashboard/<id>/...`; the two halves are the same
+shape.
+
+**Sharing requires `shared` first.** A private object refuses a share with
+`object is private; make it shared before sharing` -- private means the
+owner alone, and the two steps are deliberately separate.
+
+**Getting the subject right** is the one thing that catches people. The
+spelling depends on whether your users carry a tenant:
+
+- **With tenants** (roles named `tenant_<guid>` or `Tenant_<guid>_Role`):
+  `user:<tenant-guid>.<member-guid>`, and `GET /subjects` hands you exactly
+  the string to send.
+- **Without tenants** (a plain Superset, no tenant roles): send the bare
+  Superset user id -- `user:2`. The response canonicalises it to
+  `user:local-2`, and **sending `user:local-2` yourself is refused** with
+  `subject does not name a known account`. Send what `GET /subjects`
+  returns, or the bare id; never the canonical form by hand.
+
+**Nothing drains the outbox unless something schedules it.** Until then a
+share is committed locally and has not reached the store, so the recipient
+still cannot see the object. With a worker, set `OWNERSHIP_OUTBOX_CELERY =
+True`. Without one, deliver by hand:
+
+```bash
+superset ownership outbox drain     # delivered / failed / dead / skipped
+superset ownership outbox status    # what is still waiting, and is the store up
+```
+
+The module says so itself at boot: *the outbox is ENABLED but no Celery
+beat entry runs superset_ownership.outbox.drain*. That warning is worth
+believing.
+
+### Reading `check` on a single-tenant instance
+
+On an instance with no tenant roles at all, `superset ownership check`
+reports every object under `untenanted_public` and still answers
+`"ok": true`. That is expected, not damage: an object's tenant is derived
+from its owner's tenant role, so with no tenant roles there is nothing to
+stamp. It matters only under `OWNERSHIP_PUBLIC_SCOPE = "tenant"`, where a
+public object is public *within its tenant* -- an untenanted one is then
+visible to nobody but its owner. If you are running single-tenant, set
+`OWNERSHIP_PUBLIC_SCOPE = "instance"` and the field stops mattering.
 
 ## Quick setup
 
@@ -692,53 +787,162 @@ config-docker.py` now refuses to start rather than do that silently
 `.seed-out/seed.env` and brings up `superset`/`worker` in the same script
 run, so it never hits this. Only a concern if you drive the steps by hand.
 
-## For pcs-ivanti (applying this to your FIPS build)
+## For pcs-ivanti (applying this to your FIPS Chainguard build)
 
-You do not need `docker/Dockerfile.pcs-ownership` at all -- that is this
-shell's own two-step demonstration path. What actually matters for your
-Dockerfile: the frontend overlay lands *before* your `npm run build`; the
-backend is one wheel install plus a one-line shim; one build-time check;
-and one entrypoint swap.
+Written against `preset-io/pcs-ivanti` as it stands -- its
+`docker/Dockerfile.ivanti-superset`, its `superset-oss/` source layout, and
+its `docker/entrypoint-ivanti.sh`. Five additions to files you already have.
+You do not need `docker/Dockerfile.pcs-ownership` from this repository at
+all; that is this shell's own demonstration path, and its `uv`/`/app/.venv`
+assumptions do not apply to your image.
+
+**Python 3.11 or newer is required** -- the wheel declares
+`requires-python = ">=3.11"` and pip refuses it on 3.10. Ivanti has
+confirmed the FIPS base moves to 3.11.
+
+### 1. The frontend overlay, before your `npm run build`
+
+In the `superset-node` stage, immediately after the line that copies the
+frontend source in:
 
 ```dockerfile
-# before your frontend build (npm run build) -- your source tree, not this shell's:
-COPY overlay/frontend/ /app/superset-frontend/
-
-# in your final/runtime stage. The PCS venv ships `uv`, not `pip` (a bare
-# `pip install` fails with "No module named pip"); --no-deps because the
-# venv is already fully pinned and everything the wheel needs is in it.
-# Build the wheel with packaging/build-wheel.sh (or take the one Preset
-# ships) -- it is a plain, pure-Python wheel.
-COPY superset_ownership-0.5.0-py3-none-any.whl /tmp/
-RUN uv pip install --python /app/.venv/bin/python --no-deps /tmp/superset_ownership-0.5.0-py3-none-any.whl \
- && rm /tmp/superset_ownership-0.5.0-py3-none-any.whl
-
-# the ONE pythonpath entry -- a single file, never a directory COPY or bind
-# mount over your image's PYTHONPATH entry (the earlier pcs-ivanti spike's
-# trap: a directory-level mount hides everything else already on it). Do
-# NOT also copy superset_ownership onto PYTHONPATH: it would shadow the wheel.
-COPY overlay/pythonpath/superset_config_ownership.py /app/pythonpath/superset_config_ownership.py
-
-# fail the build on drift: the wrap the wheel installs at boot pins the
-# stock superset/dashboards/api.py; this reads the installed file (no app
-# needed) and refuses if your PCS version changed that method.
-RUN /app/.venv/bin/python -c "from superset_ownership.dashboard_patch import assert_stock_file; assert_stock_file()"
-
-# your entrypoint should run `superset ownership db upgrade` and `superset
-# ownership check` after your own `superset db upgrade`/init, before exec'ing
-# your server command -- see docker/entrypoint-ownership.sh for the pattern
-# (and its SERVER_WORKER_AMOUNT export, which your run-server.sh may not
-# have yet -- see UPSTREAM_SHA's docker/entrypoints/run-server.sh entry).
-# Your Celery worker/beat images need the same wheel + shim.
+COPY ./superset-oss/superset-frontend /app/superset-frontend
+COPY ./pcs-ownership/overlay/frontend/ /app/superset-frontend/     # <-- add
 ```
 
-Optional: `overlay/pythonpath/ivanti_pcs_example/` (the reference hook
-package) can be copied as a second individual pythonpath entry for a
-scratch/dev image; it is not part of a default deployment.
+It overlays `src/` and `packages/superset-ui-core/`; nothing under
+`superset/` is touched. `scripts/apply-overlay.sh <tree>` does the same
+copy with a drift guard if you would rather run it against your extracted
+`superset-oss/` before the build.
 
-Run `scripts/apply-overlay.sh <your-pcs-src-tree>` if you'd rather have
-this script copy the frontend overlay (with the drift guard) than
-hand-transcribe the `COPY` line -- it copies nothing under `superset/`.
+### 2. The wheel, in the BUILDER stage -- not the final one
+
+Your `final` stage deliberately removes pip, setuptools and wheel for FIPS,
+so nothing can be installed there. Install into `superset-builder`, whose
+`site-packages` the final stage already copies across:
+
+```dockerfile
+# superset-builder, after `pip install --no-cache-dir -e .`
+COPY ./pcs-ownership/dist/superset_ownership-0.6.0-py3-none-any.whl /tmp/
+RUN pip install --no-cache-dir --no-deps /tmp/superset_ownership-0.6.0-py3-none-any.whl \
+ && rm /tmp/superset_ownership-0.6.0-py3-none-any.whl
+```
+
+`--no-deps` because your requirements are already resolved and pinned, and
+everything the wheel imports is in them. Build the wheel with
+`packaging/build-wheel.sh`; it is pure Python, no compiled extensions, so
+it carries no FIPS surface of its own.
+
+### 3. The config shim, one file on PYTHONPATH
+
+Also in `superset-builder`, so your existing
+`COPY --from=superset-builder ${SUPERSET_HOME} ${SUPERSET_HOME}` carries it:
+
+```dockerfile
+COPY ./pcs-ownership/overlay/pythonpath/superset_config_ownership.py \
+     ${SUPERSET_HOME}/pythonpath/superset_config_ownership.py
+
+# fail the build on drift rather than at runtime: this reads the installed
+# stock file and refuses if your PCS version changed the method the wheel
+# wraps. No app, no database needed.
+RUN python3 -c "from superset_ownership.dashboard_patch import assert_stock_file; assert_stock_file()"
+```
+
+A single **file**, never a directory copied or mounted over
+`${SUPERSET_HOME}/pythonpath` -- a directory-level mount hides everything
+already there, which is the trap the earlier pcs-ivanti spike hit. And do
+not also copy `superset_ownership/` onto PYTHONPATH: it would shadow the
+installed wheel.
+
+Then call it from your own `superset_config_docker.py`, after your settings:
+
+```python
+from superset_config_ownership import configure
+configure(globals())
+```
+
+### 4. The migration, in your entrypoint
+
+`docker/entrypoint-ivanti.sh` already runs `superset db upgrade` and
+`superset init`. The ownership chain is separate and must run with them --
+otherwise an upgraded image serves requests against a schema that has not
+caught up:
+
+```bash
+superset db upgrade          # yours, unchanged
+superset ownership db upgrade # this module's own chain; touches nothing of yours
+superset init                # yours, unchanged
+superset ownership check     # refuses to start quiet if something is inconsistent
+```
+
+On the **first** deploy only, adopt what is already in the database --
+every existing dashboard and chart gets an owner and becomes public, so
+nothing a user could see yesterday disappears today:
+
+```bash
+python -c "
+from superset.app import create_app
+app = create_app()
+with app.app_context():
+    from superset_ownership.backfill import run
+    run()
+"
+superset ownership backfill-tenants
+```
+
+`docker/entrypoint-ownership.sh` in this repository is a worked version of
+exactly this, including its exit-code handling; it is worth reading before
+you write your own.
+
+### 5. The outbox drain, on your worker
+
+Your Celery worker and beat images need the same wheel and the same shim.
+Sharing changes are committed locally and delivered to OpenFGA by a
+background drain -- without it they are written and never arrive. You do
+not hand-write the schedule; set
+
+```python
+OWNERSHIP_OUTBOX_CELERY = True          # needs a redis broker
+OWNERSHIP_OUTBOX_DRAIN_SECONDS = 10.0   # optional, this is the default
+```
+
+and `configure()` registers the beat entry (`superset_ownership.outbox.drain`)
+for you.
+
+**One thing to check before you enable it:** with `OWNERSHIP_OUTBOX_CELERY`
+on, `configure()` **assigns `CELERY_CONFIG`** -- it does not merge. If your
+own `superset_config_docker.py` already defines `CELERY_CONFIG`, yours is
+replaced and your own schedules and broker settings are lost. If you have
+one, leave `OWNERSHIP_OUTBOX_CELERY` off and add the entry to your own
+config instead:
+
+```python
+class CeleryConfig:                      # yours, with one addition
+    imports = ("superset_ownership.outbox", ...)
+    beat_schedule = {
+        ...,
+        "superset_ownership.outbox.drain": {
+            "task": "superset_ownership.outbox.drain",
+            "schedule": 10.0,
+            "options": {"expires": 10.0},
+        },
+    }
+```
+
+`expires` matters: a tick that could not run inside one interval should be
+dropped, not queued, so a worker outage does not replay hundreds of drains
+when it comes back.
+
+If you run no worker at all, `superset ownership outbox drain` delivers
+pending rows by hand, and `superset ownership outbox status` shows what is
+waiting.
+
+### Optional
+
+`overlay/pythonpath/ivanti_pcs_example/` is the reference hook package --
+identity, directory, authorizer and config-provider implementations for a
+deployment shaped like yours. Copy it as a second individual pythonpath
+entry for a scratch or dev image; it is not part of a default deployment.
 
 ### PCS version bump procedure
 
