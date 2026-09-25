@@ -23,6 +23,11 @@ this feature against *your* store, your users and your groups, skip the
 demo entirely: [Bring your own OpenFGA](#bring-your-own-openfga). You need
 the wheel, one config file, and about ten minutes.
 
+**Running Ivanti Neurons?** Your identifier shapes are already confirmed
+and already match the defaults. Go straight to [your settings, written
+out](#if-you-run-ivanti-neurons-your-settings-written-out) -- it is one
+config block and no identity code.
+
 The stock Preset PCS source is never part of this repository -- it is
 fetched when you build.
 
@@ -373,6 +378,113 @@ your roles: point the module at wherever your tenant actually lives, with
 `OWNERSHIP_TENANT_GUID` (and `OWNERSHIP_MEMBER_GUID`, if the member id is
 not the username) from step 4. Then re-run `backfill-tenants` and
 `check`.
+
+## If you run Ivanti Neurons: your settings, written out
+
+Ivanti confirmed their identifier shapes in writing (PCS-10243). They
+match what this module already assumes. **You do not need to write any
+identity code.** Copy the block below, fill in the three store values,
+and you are configured.
+
+```python
+OWNERSHIP_ENABLED = True
+OWNERSHIP_AUTHORIZER = "openfga"
+OWNERSHIP_DIRECTORY = "openfga"
+
+OWNERSHIP_FGA_API_URL = os.environ["OPENFGA_API_URL"]
+OWNERSHIP_FGA_STORE = os.environ["OPENFGA_STORE_ID"]
+OWNERSHIP_FGA_MODEL = os.environ["OPENFGA_MODEL_ID"]
+OWNERSHIP_FGA_CREDENTIALS = {"type": "none"}   # or api_token, see step 2
+
+OWNERSHIP_PUBLIC_SCOPE = "tenant"              # public means "public in this tenant"
+OWNERSHIP_GROUP_ID_FORMAT = "{tenant}.{name}"  # your group ids already look like this
+OWNERSHIP_DIRECTORY_GROUP_WALK = "always"      # you write no group -> tenant tuples
+OWNERSHIP_DEFAULT_OWNER = 1                    # a real user id; see "old objects" below
+```
+
+You do **not** need `OWNERSHIP_MEMBER_GUID`, `OWNERSHIP_TENANT_GUID`,
+`OWNERSHIP_IS_TENANT_ADMINISTRATOR`, `OWNERSHIP_GROUP_ID` or
+`OWNERSHIP_SPLIT_GROUP_ID`. Those exist for deployments shaped differently
+from yours.
+
+### How we work out who someone is
+
+| Thing | Where we read it |
+|---|---|
+| Member GUID | the Superset **username** |
+| Tenant GUID | the user's role, named `Tenant_<tenant-guid>_Role` |
+| Person, in the store | `user:<tenant-guid>.<member-guid>` |
+| Group, in the store | `group:<tenant-guid>.<group-id>` |
+| A group's tenant | read from the front of the group id, not from a tuple |
+| Tenant administrator | the `admin` relation on `tenant:<tenant-guid>` |
+
+The rewritten email (`<tenant-guid>_<member-guid>__<original-email>`) is
+handled too: if the username is not a GUID, we read the member GUID out of
+the email instead. The role is what we use for the tenant.
+
+Groups can contain other groups. We do not flatten them. OpenFGA follows
+the chain for us, however deep it goes.
+
+### What we write, and what we never touch
+
+We write only four kinds of tuple, and only on dashboards and charts:
+`owner`, `editor`, `viewer` and `tenant`.
+
+We **never** write:
+
+- tenant administrators (`admin` on a tenant) -- your platform owns that,
+  we only read it;
+- who is in a tenant (`member` on a tenant);
+- who is in a group (`member` on a group);
+- nested group links.
+
+So nothing this module does can change who your platform says a person is.
+
+### What we add to your authorization model
+
+Running `superset ownership fga install-model --pin` does not replace your
+model. It merges:
+
+- `dashboard` and `chart` are **ours**. They are added whole. They are not
+  in your store today, so nothing is lost.
+- `user`, `tenant` and `group` are **yours**. We never rewrite a relation
+  you already define. We only add one you do not have.
+- The only thing we might add to yours is `group.tenant`. It is harmless:
+  with `OWNERSHIP_DIRECTORY_GROUP_WALK = "always"` we never read it.
+
+We need three relations to already exist in your model: `tenant.member`,
+`tenant.admin` and `group.member`. All three are live in yours.
+
+### Old objects, when you attach a database that already has data
+
+Everything that already exists becomes **public** and gets an owner. So
+nobody loses access on the day you install this. The owner is worked out
+in this order: who created it, then who last changed it, then
+`OWNERSHIP_DEFAULT_OWNER`.
+
+That last one matters. Objects that were imported, or came from examples,
+often have no recorded creator. Without a default owner they end up public
+with **no owner at all**, and then nobody can share them or make them
+private, because every one of those actions needs an owner. Set
+`OWNERSHIP_DEFAULT_OWNER` to a real user id before you run the backfill.
+
+One migration touches your schema: it adds a foreign key from our table to
+`ab_user`. On PostgreSQL that briefly blocks writes to `ab_user` while it
+checks existing rows, so logins wait for it. That is milliseconds on a
+normal user table. If yours is very large, run the migration in a
+maintenance window.
+
+### Two things to know before you hit them
+
+**An empty group cannot be shared with.** We check a group is real by
+looking for its members. A group with nobody in it looks like a group that
+does not exist, and a share to it is refused. Put someone in the group
+first.
+
+**A tenant administrator sees everything in their own tenant.** Private,
+shared, public, even objects with no owner. They can also take ownership
+or hand it to someone else. They cannot see another tenant's objects.
+
 
 ## Quick setup
 
