@@ -102,6 +102,7 @@ Worth setting deliberately:
 |---|---|---|
 | `OWNERSHIP_PUBLIC_SCOPE` | `"tenant"` | Whether "public" means everyone in the object's tenant, or anyone holding the dataset grant (`"instance"`) |
 | `OWNERSHIP_GROUP_ID_FORMAT` | `"{tenant}.{name}"` | How a group id is composed. Must match what is in your store |
+| `OWNERSHIP_DIRECTORY_GROUP_WALK` | `"auto"` | Set to `"always"` if your store writes no `group -> tenant` tuples (a group id that already carries its tenant needs none). On `auto` every group listing first reads an empty page before falling back to the walk, and `plugin verify` reports WARN |
 | `OWNERSHIP_LOOKUP_CACHE_TTL` | `10` | Seconds a row is served from the shared cache. Also the maximum lag before a revoked tenant administrator stops reading |
 | `OWNERSHIP_OUTBOX_ENABLED` | `True` | Keep it on: writes are queued and delivered in order, so a store outage never loses a change |
 | `OWNERSHIP_MANAGE_PERMISSION` | `None` | Optional role that may manage others' sharing |
